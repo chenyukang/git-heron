@@ -12,6 +12,22 @@
   --shadow: 0 10px 24px rgba(15, 23, 42, 0.08);
 }
 
+@media (prefers-color-scheme: dark) {
+  :root {
+    color-scheme: dark;
+    --bg: #0b1220;
+    --panel: #0f172a;
+    --text: #e5e7eb;
+    --muted: #94a3b8;
+    --line: #334155;
+    --blue: #3b82f6;
+    --blue-dark: #2563eb;
+    --green: #86efac;
+    --yellow: #facc15;
+    --shadow: 0 10px 24px rgba(0, 0, 0, 0.32);
+  }
+}
+
 * {
   box-sizing: border-box;
 }
@@ -396,5 +412,86 @@ textarea:focus {
 @media (max-width: 360px) {
   .field-row {
     grid-template-columns: 1fr;
+  }
+}
+
+@media (prefers-color-scheme: dark) {
+  button,
+  input,
+  textarea,
+  .status {
+    background: #111827;
+    color: var(--text);
+  }
+
+  input::placeholder,
+  textarea::placeholder {
+    color: #64748b;
+  }
+
+  .topbar {
+    background: rgba(15, 23, 42, 0.96);
+  }
+
+  label {
+    color: #cbd5e1;
+  }
+
+  .quote {
+    border-left-color: var(--yellow);
+    background: #2a2413;
+    color: #e2e8f0;
+  }
+
+  .status.error {
+    border-color: #7f1d1d;
+    background: #3f121d;
+    color: #fecdd3;
+  }
+
+  .status.success {
+    border-color: #14532d;
+    background: #052e1b;
+    color: #bbf7d0;
+  }
+
+  .pill,
+  .sync-pill[data-status="pending"],
+  .sync-pill[data-status="syncing"] {
+    background: #1e1b4b;
+    color: #c7d2fe;
+  }
+
+  .pill.connected,
+  .sync-pill {
+    background: #052e1b;
+    color: #bbf7d0;
+  }
+
+  .sync-pill[data-status="failed"] {
+    background: #3f121d;
+    color: #fecdd3;
+  }
+
+  .sync-error {
+    color: #fda4af;
+  }
+
+  .annotation-item {
+    border-bottom-color: #1e293b;
+    background: var(--panel);
+  }
+
+  .annotation-quote {
+    color: #f8fafc;
+  }
+
+  .annotation-note {
+    color: #94a3b8;
+  }
+
+  .tag {
+    background: #1e293b;
+    color: #cbd5e1;
   }
 }
