@@ -33,6 +33,7 @@
   document.addEventListener("keyup", handleKeyUp, true);
   document.addEventListener("selectionchange", scheduleToolbarHide);
   document.addEventListener("click", handleDocumentClick, true);
+  window.addEventListener("unhandledrejection", handleUnhandledRejection);
 
   chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
     if (message?.type === "GET_PAGE_CONTEXT") {
@@ -105,7 +106,10 @@
 
   function handleKeyDown(event) {
     if (event.key === "Escape") {
-      hideToolbar();
+      if (closeTopmostOverlay()) {
+        event.preventDefault();
+        event.stopPropagation();
+      }
       return;
     }
 
@@ -412,6 +416,30 @@
       detail.root.hidden = true;
       detail.annotation = null;
     }
+  }
+
+  function closeTopmostOverlay() {
+    if (editor && !editor.root.hidden) {
+      closeEditor();
+      return true;
+    }
+
+    if (detail && !detail.root.hidden) {
+      closeDetail();
+      return true;
+    }
+
+    if (pagePanel && !pagePanel.root.hidden) {
+      pagePanel.root.hidden = true;
+      return true;
+    }
+
+    if (toolbar && !toolbar.hidden) {
+      hideToolbar();
+      return true;
+    }
+
+    return false;
   }
 
   async function togglePagePanel() {
@@ -1436,41 +1464,52 @@
   }
 
   function renderTagPicker(picker) {
-    picker.selected.textContent = "";
-    for (const tag of picker.selectedTags) {
-      const chip = document.createElement("span");
-      chip.className = `${picker.prefix}__tag-chip`;
-      const text = document.createElement("span");
-      text.textContent = tag;
-      const remove = document.createElement("button");
-      remove.type = "button";
-      remove.textContent = "x";
-      remove.title = `Remove ${tag}`;
-      remove.setAttribute("aria-label", `Remove ${tag}`);
-      remove.addEventListener("click", (event) => {
-        event.preventDefault();
-        event.stopPropagation();
-        removeTagFromPicker(picker, tag);
-      });
-      chip.append(text, remove);
-      picker.selected.append(chip);
-    }
+    try {
+      if (!picker?.root?.isConnected) {
+        return;
+      }
 
-    picker.recent.textContent = "";
-    const selected = new Set(picker.selectedTags.map((tag) => tag.toLowerCase()));
-    const candidates = picker.recentTags.filter((tag) => !selected.has(tag.toLowerCase())).slice(0, 12);
-    picker.recent.hidden = !candidates.length;
-    for (const tag of candidates) {
-      const button = document.createElement("button");
-      button.type = "button";
-      button.textContent = tag;
-      button.addEventListener("click", (event) => {
-        event.preventDefault();
-        event.stopPropagation();
-        addTagToPicker(picker, tag);
-        picker.input.focus();
-      });
-      picker.recent.append(button);
+      picker.selected.textContent = "";
+      for (const tag of picker.selectedTags) {
+        const chip = document.createElement("span");
+        chip.className = `${picker.prefix}__tag-chip`;
+        const text = document.createElement("span");
+        text.textContent = tag;
+        const remove = document.createElement("button");
+        remove.type = "button";
+        remove.textContent = "x";
+        remove.title = `Remove ${tag}`;
+        remove.setAttribute("aria-label", `Remove ${tag}`);
+        remove.addEventListener("click", (event) => {
+          event.preventDefault();
+          event.stopPropagation();
+          removeTagFromPicker(picker, tag);
+        });
+        chip.append(text, remove);
+        picker.selected.append(chip);
+      }
+
+      picker.recent.textContent = "";
+      const selected = new Set(picker.selectedTags.map((tag) => tag.toLowerCase()));
+      const candidates = picker.recentTags.filter((tag) => !selected.has(tag.toLowerCase())).slice(0, 12);
+      picker.recent.hidden = !candidates.length;
+      for (const tag of candidates) {
+        const button = document.createElement("button");
+        button.type = "button";
+        button.textContent = tag;
+        button.addEventListener("click", (event) => {
+          event.preventDefault();
+          event.stopPropagation();
+          addTagToPicker(picker, tag);
+          picker.input.focus();
+        });
+        picker.recent.append(button);
+      }
+    } catch (error) {
+      if (isExtensionContextInvalidated(error)) {
+        return;
+      }
+      throw error;
     }
   }
 
@@ -2000,6 +2039,13 @@
   }
 
   function stopUiEventPropagation(event) {
+    if (event.type === "keydown" && event.key === "Escape") {
+      if (closeTopmostOverlay()) {
+        event.preventDefault();
+      }
+      event.stopPropagation();
+      return;
+    }
     event.stopPropagation();
   }
 
@@ -2125,10 +2171,24 @@
   }
 
   function sendRuntimeMessage(message) {
-    if (!globalThis.chrome?.runtime?.sendMessage) {
+    if (!globalThis.chrome?.runtime?.id || !globalThis.chrome?.runtime?.sendMessage) {
       return Promise.reject(new Error("Extension connection is stale. Reload this page and try again."));
     }
-    return chrome.runtime.sendMessage(message);
+    try {
+      return chrome.runtime.sendMessage(message);
+    } catch (error) {
+      return Promise.reject(error);
+    }
+  }
+
+  function handleUnhandledRejection(event) {
+    if (isExtensionContextInvalidated(event.reason)) {
+      event.preventDefault();
+    }
+  }
+
+  function isExtensionContextInvalidated(error) {
+    return /extension context invalidated/i.test(error?.message || String(error));
   }
 
   function showEditorRuntimeError(error) {

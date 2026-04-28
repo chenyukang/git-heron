@@ -70,6 +70,8 @@ async function init() {
 }
 
 function bindEvents() {
+  document.addEventListener("keydown", handleGlobalKeydown, true);
+
   elements.settingsToggle.addEventListener("click", () => {
     setSettingsPanelVisible(elements.settingsPanel.hidden);
   });
@@ -89,6 +91,37 @@ function bindEvents() {
       document.querySelectorAll(".swatch").forEach((item) => item.classList.toggle("is-selected", item === button));
     });
   });
+}
+
+function handleGlobalKeydown(event) {
+  if (event.key !== "Escape") {
+    return;
+  }
+
+  if (!elements.settingsPanel.hidden) {
+    event.preventDefault();
+    event.stopPropagation();
+    setSettingsPanelVisible(false);
+    return;
+  }
+
+  if (!elements.selectionPanel.hidden && state.draft) {
+    event.preventDefault();
+    event.stopPropagation();
+    cancelDraft();
+  }
+}
+
+async function cancelDraft() {
+  try {
+    await sendRuntime({ type: "CLEAR_DRAFT", tabId: state.tabId });
+  } catch {
+    // The visible draft can still be cleared locally.
+  }
+  state.draft = null;
+  elements.note.value = "";
+  setSelectedTags([]);
+  renderDraft();
 }
 
 async function loadSettings() {
