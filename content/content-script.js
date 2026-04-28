@@ -994,6 +994,7 @@
   }
 
   function handleEditorShortcut(event) {
+    event.stopPropagation();
     if (event.key === "Enter" && (event.ctrlKey || event.metaKey)) {
       event.preventDefault();
       saveEditorAnnotation();
@@ -1480,6 +1481,7 @@
     }
 
     uiRoot = host.shadowRoot || host.attachShadow({ mode: "open" });
+    installUiEventGuards(uiRoot);
     if (!uiRoot.querySelector("[data-gh-annotator-style]")) {
       const stylesheet = document.createElement("link");
       stylesheet.dataset.ghAnnotatorStyle = "true";
@@ -1489,6 +1491,21 @@
     }
 
     return uiRoot;
+  }
+
+  function installUiEventGuards(root) {
+    if (root.__ghAnnotatorGuardsInstalled) {
+      return;
+    }
+
+    root.__ghAnnotatorGuardsInstalled = true;
+    ["keydown", "keypress", "keyup"].forEach((type) => {
+      root.addEventListener(type, stopUiEventPropagation);
+    });
+  }
+
+  function stopUiEventPropagation(event) {
+    event.stopPropagation();
   }
 
   function isAnnotatorUi(target) {
