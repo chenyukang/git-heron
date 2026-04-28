@@ -1,0 +1,50 @@
+{
+  "manifest_version": 3,
+  "name": "GitHub Web Annotator",
+  "description": "Highlight web pages and sync annotations directly to a GitHub repository.",
+  "version": "0.1.0",
+  "action": {
+    "default_title": "GitHub Web Annotator"
+  },
+  "permissions": [
+    "activeTab",
+    "sidePanel",
+    "storage"
+  ],
+  "host_permissions": [
+    "https://api.github.com/*"
+  ],
+  "web_accessible_resources": [
+    {
+      "resources": [
+        "content/content-style.css"
+      ],
+      "matches": [
+        "http://*/*",
+        "https://*/*"
+      ]
+    }
+  ],
+  "background": {
+    "service_worker": "background/service-worker.js",
+    "type": "module"
+  },
+  "side_panel": {
+    "default_path": "sidepanel/sidepanel.html"
+  },
+  "content_scripts": [
+    {
+      "matches": [
+        "http://*/*",
+        "https://*/*"
+      ],
+      "css": [
+        "content/content-style.css"
+      ],
+      "js": [
+        "content/content-script.js"
+      ],
+      "run_at": "document_idle"
+    }
+  ]
+}

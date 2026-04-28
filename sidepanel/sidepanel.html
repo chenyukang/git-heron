@@ -1,0 +1,106 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>GitHub Web Annotator</title>
+    <link rel="stylesheet" href="sidepanel.css">
+  </head>
+  <body>
+    <header class="topbar">
+      <div>
+        <h1>Annotator</h1>
+        <p id="page-title">No page connected</p>
+      </div>
+      <button id="settings-toggle" class="icon-button" type="button" title="Settings" aria-label="Settings" aria-expanded="false">⚙</button>
+    </header>
+
+    <main>
+      <section id="status" class="status" aria-live="polite"></section>
+
+      <section id="settings-panel" class="panel" hidden>
+        <div class="section-heading">
+          <h2>GitHub</h2>
+          <span id="settings-state" class="pill">Not connected</span>
+        </div>
+
+        <label>
+          Token
+          <input id="token" type="password" autocomplete="off" placeholder="github_pat_...">
+        </label>
+
+        <label>
+          Repository
+          <input id="repo" type="text" spellcheck="false" placeholder="owner/repo">
+        </label>
+
+        <div class="field-row">
+          <label>
+            Branch
+            <input id="branch" type="text" spellcheck="false" placeholder="main">
+          </label>
+          <label>
+            Path
+            <input id="base-path" type="text" spellcheck="false" placeholder="annotations">
+          </label>
+        </div>
+
+        <label class="checkbox-label">
+          <input id="show-selection-toolbar" type="checkbox">
+          Show floating button
+        </label>
+
+        <label>
+          Shortcut
+          <input id="activation-shortcut" type="text" spellcheck="false" placeholder="Ctrl+E">
+        </label>
+
+        <div class="button-row">
+          <button id="save-settings" class="primary" type="button">Save</button>
+          <button id="test-settings" type="button">Test</button>
+        </div>
+      </section>
+
+      <section id="selection-panel" class="panel" hidden>
+        <div class="section-heading">
+          <h2>Selection</h2>
+          <span id="draft-state" class="pill">Empty</span>
+        </div>
+
+        <blockquote id="quote" class="quote">No selection captured.</blockquote>
+
+        <label>
+          Note
+          <textarea id="note" rows="5" placeholder="Write a note"></textarea>
+        </label>
+
+        <label>
+          Tags
+          <input id="tags" type="text" spellcheck="false" placeholder="reading, idea">
+        </label>
+
+        <div class="color-row" role="radiogroup" aria-label="Highlight color">
+          <button class="swatch is-selected" type="button" data-color="yellow" title="Yellow" aria-label="Yellow"></button>
+          <button class="swatch" type="button" data-color="green" title="Green" aria-label="Green"></button>
+          <button class="swatch" type="button" data-color="blue" title="Blue" aria-label="Blue"></button>
+          <button class="swatch" type="button" data-color="pink" title="Pink" aria-label="Pink"></button>
+        </div>
+
+        <button id="save-annotation" class="primary full-width" type="button" disabled>Save annotation</button>
+      </section>
+
+      <section class="annotations">
+        <div class="section-heading">
+          <h2>Page Notes</h2>
+          <div class="compact-actions">
+            <button id="sync" class="icon-button" type="button" title="Sync from GitHub" aria-label="Sync from GitHub">↻</button>
+            <button id="refresh" class="icon-button" type="button" title="Refresh page state" aria-label="Refresh page state">⟳</button>
+          </div>
+        </div>
+        <div id="annotation-list" class="annotation-list"></div>
+      </section>
+    </main>
+
+    <script src="sidepanel.js"></script>
+  </body>
+</html>
