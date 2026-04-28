@@ -19,6 +19,7 @@ const elements = {
   branch: document.querySelector("#branch"),
   basePath: document.querySelector("#base-path"),
   showSelectionToolbar: document.querySelector("#show-selection-toolbar"),
+  backgroundSync: document.querySelector("#background-sync"),
   activationShortcut: document.querySelector("#activation-shortcut"),
   saveSettings: document.querySelector("#save-settings"),
   testSettings: document.querySelector("#test-settings"),
@@ -38,6 +39,10 @@ chrome.runtime.onMessage.addListener((message) => {
   if (message?.type === "DRAFT_UPDATED" && message.tabId === state.tabId) {
     state.draft = message.draft;
     renderDraft();
+  }
+
+  if (message?.type === "ANNOTATION_SYNC_UPDATED") {
+    updateLocalAnnotation(message.annotation);
   }
 });
 
@@ -79,6 +84,7 @@ function renderSettings() {
   elements.branch.value = state.settings?.branch || "main";
   elements.basePath.value = state.settings?.basePath || "annotations";
   elements.showSelectionToolbar.checked = state.settings?.showSelectionToolbar ?? true;
+  elements.backgroundSync.checked = state.settings?.backgroundSync ?? false;
   elements.activationShortcut.value = state.settings?.activationShortcut || "Ctrl+E";
   elements.token.placeholder = state.settings?.hasToken ? "Saved token" : "github_pat_...";
 
@@ -142,6 +148,7 @@ async function saveSettings() {
     branch: elements.branch.value.trim() || "main",
     basePath: elements.basePath.value.trim() || "annotations",
     showSelectionToolbar: elements.showSelectionToolbar.checked,
+    backgroundSync: elements.backgroundSync.checked,
     activationShortcut: elements.activationShortcut.value.trim() || "Ctrl+E"
   };
   if (token) {
@@ -168,6 +175,7 @@ async function testSettings() {
     branch: elements.branch.value.trim() || "main",
     basePath: elements.basePath.value.trim() || "annotations",
     showSelectionToolbar: elements.showSelectionToolbar.checked,
+    backgroundSync: elements.backgroundSync.checked,
     activationShortcut: elements.activationShortcut.value.trim() || "Ctrl+E"
   };
   if (token) {
@@ -212,7 +220,7 @@ async function saveAnnotation() {
     renderDraft();
     renderAnnotations();
     await applyAnnotationsToPage();
-    showStatus("Annotation saved to GitHub.", "success");
+    showStatus(response.annotation.syncStatus === "synced" ? "Annotation saved to GitHub." : "Queued for GitHub sync.", "success");
   } catch (error) {
     showStatus(readableError(error), "error");
     renderDraft();
@@ -297,11 +305,39 @@ function renderAnnotationItem(annotation) {
   meta.textContent = formatDate(annotation.createdAt);
   item.append(meta);
 
+  const sync = document.createElement("div");
+  sync.className = "annotation-sync";
+  const syncPill = document.createElement("span");
+  syncPill.className = "sync-pill";
+  syncPill.dataset.status = annotation.syncStatus || "synced";
+  syncPill.textContent = syncStatusLabel(annotation.syncStatus);
+  sync.append(syncPill);
+  if (annotation.syncStatus === "failed" && annotation.syncError) {
+    const error = document.createElement("span");
+    error.className = "sync-error";
+    error.textContent = annotation.syncError;
+    sync.append(error);
+  }
+  item.append(sync);
+
+  const actions = document.createElement("div");
+  actions.className = "annotation-actions";
+
   const focus = document.createElement("button");
   focus.type = "button";
   focus.textContent = "Focus";
   focus.addEventListener("click", () => focusAnnotation(annotation.id));
-  item.append(focus);
+  actions.append(focus);
+
+  if (annotation.syncStatus === "failed") {
+    const retry = document.createElement("button");
+    retry.type = "button";
+    retry.textContent = "Retry";
+    retry.addEventListener("click", () => retryAnnotationSync(annotation));
+    actions.append(retry);
+  }
+
+  item.append(actions);
 
   return item;
 }
@@ -327,6 +363,51 @@ async function focusAnnotation(id) {
   } catch (error) {
     showStatus(readableError(error), "error");
   }
+}
+
+async function retryAnnotationSync(annotation) {
+  if (!annotation?.id) {
+    return;
+  }
+
+  showStatus("Retrying sync...");
+  try {
+    const response = await sendRuntime({
+      type: "RETRY_ANNOTATION_SYNC",
+      id: annotation.id,
+      url: annotation.url || state.page?.url
+    });
+    updateLocalAnnotation(response.annotation);
+    showStatus("Queued for GitHub sync.", "success");
+  } catch (error) {
+    showStatus(readableError(error), "error");
+  }
+}
+
+function updateLocalAnnotation(annotation) {
+  if (!annotation?.id) {
+    return;
+  }
+
+  state.annotations = [annotation].concat(state.annotations.filter((item) => item.id !== annotation.id));
+  renderAnnotations();
+  applyAnnotationsToPage();
+  if (annotation.syncStatus === "failed") {
+    showStatus(`Sync failed: ${annotation.syncError || "Unknown error."}`, "error");
+  }
+}
+
+function syncStatusLabel(status) {
+  if (status === "pending") {
+    return "Queued";
+  }
+  if (status === "syncing") {
+    return "Syncing";
+  }
+  if (status === "failed") {
+    return "Failed";
+  }
+  return "Synced";
 }
 
 function parseTags(value) {

@@ -1,18 +1,29 @@
 const SETTINGS_KEY = "settings";
 const DRAFT_PREFIX = "draft:";
 const CACHE_PREFIX = "cache:";
+const SYNC_QUEUE_KEY = "syncQueue";
+const SYNC_ALARM_NAME = "github-annotator-sync";
 const DEFAULT_BRANCH = "main";
 const DEFAULT_BASE_PATH = "annotations";
 const DEFAULT_SHOW_SELECTION_TOOLBAR = true;
 const DEFAULT_ACTIVATION_SHORTCUT = "Ctrl+E";
+const DEFAULT_BACKGROUND_SYNC = false;
 const GITHUB_API = "https://api.github.com";
 const GITHUB_API_VERSION = "2022-11-28";
 const DEBUG = true;
+
+let syncQueueRunning = false;
+let githubWriteLock = Promise.resolve();
 
 setupExtension();
 
 chrome.runtime.onInstalled.addListener(setupExtension);
 chrome.runtime.onStartup?.addListener(setupExtension);
+chrome.alarms?.onAlarm.addListener((alarm) => {
+  if (alarm.name === SYNC_ALARM_NAME) {
+    syncQueuedAnnotations().catch((error) => debugWarn("syncQueuedAnnotations:alarmFailed", { message: formatError(error) }));
+  }
+});
 chrome.tabs.onUpdated.addListener((tabId, changeInfo) => {
   if (changeInfo.status === "loading") {
     updateBadge(tabId, 0);
@@ -51,6 +62,8 @@ async function setupExtension() {
   } catch {
     // Badge styling is cosmetic.
   }
+
+  scheduleSyncQueue().catch((error) => debugWarn("setupExtension:scheduleSyncQueueFailed", { message: formatError(error) }));
 }
 
 async function openPagePanelFromAction(tab) {
@@ -98,6 +111,9 @@ async function handleMessage(message, sender) {
     case "SAVE_ANNOTATION":
       return { annotation: await saveAnnotation(message.annotation, message.tabId ?? sender?.tab?.id) };
 
+    case "RETRY_ANNOTATION_SYNC":
+      return { annotation: await retryAnnotationSync(message.id, message.url) };
+
     default:
       throw new Error(`Unknown message type: ${message?.type || "empty"}`);
   }
@@ -143,7 +159,8 @@ function buildSettings(rawSettings = {}, existing = {}) {
     branch: (rawSettings.branch || existing.branch || DEFAULT_BRANCH).trim() || DEFAULT_BRANCH,
     basePath: normalizePath(rawSettings.basePath || existing.basePath || DEFAULT_BASE_PATH),
     showSelectionToolbar: rawSettings.showSelectionToolbar ?? existing.showSelectionToolbar ?? DEFAULT_SHOW_SELECTION_TOOLBAR,
-    activationShortcut: normalizeShortcut(rawSettings.activationShortcut || existing.activationShortcut || DEFAULT_ACTIVATION_SHORTCUT)
+    activationShortcut: normalizeShortcut(rawSettings.activationShortcut || existing.activationShortcut || DEFAULT_ACTIVATION_SHORTCUT),
+    backgroundSync: rawSettings.backgroundSync ?? existing.backgroundSync ?? DEFAULT_BACKGROUND_SYNC
   };
 
   if (!settings.token) {
@@ -166,6 +183,7 @@ function sanitizeSettings(settings = {}) {
     basePath: settings.basePath || DEFAULT_BASE_PATH,
     showSelectionToolbar: settings.showSelectionToolbar ?? DEFAULT_SHOW_SELECTION_TOOLBAR,
     activationShortcut: settings.activationShortcut || DEFAULT_ACTIVATION_SHORTCUT,
+    backgroundSync: settings.backgroundSync ?? DEFAULT_BACKGROUND_SYNC,
     hasToken
   };
 }
@@ -245,8 +263,45 @@ async function saveAnnotation(input, tabId) {
     throw new Error("Annotation is missing its page URL or quote.");
   }
 
+  const annotation = buildAnnotation(input);
+
+  debugLog("saveAnnotation:start", {
+    id: annotation.id,
+    url: annotation.url,
+    title: annotation.title,
+    quoteLength: annotation.quote.length,
+    tabId,
+    backgroundSync: Boolean(settings.backgroundSync)
+  });
+
+  let savedAnnotation = annotation;
+  if (settings.backgroundSync) {
+    savedAnnotation = markAnnotationSyncState(annotation, "pending");
+    await cacheAnnotation(savedAnnotation);
+    await queueAnnotationSync(savedAnnotation);
+  } else {
+    await withGitHubWriteLock(() => upsertMarkdownPage(settings, annotation));
+    savedAnnotation = markAnnotationSyncState(annotation, "synced");
+    await cacheAnnotation(savedAnnotation);
+  }
+
+  await clearDraft(tabId);
+  await updateBadgeForUrl(tabId, annotation.url);
+
+  if (tabId != null) {
+    try {
+      await chrome.tabs.sendMessage(tabId, { type: "ANNOTATION_SAVED", annotation: savedAnnotation });
+    } catch {
+      // The content script may be unavailable on restricted pages.
+    }
+  }
+
+  return savedAnnotation;
+}
+
+function buildAnnotation(input) {
   const id = input.id || createAnnotationId();
-  const annotation = {
+  return {
     schemaVersion: 1,
     id,
     url: input.url,
@@ -263,31 +318,34 @@ async function saveAnnotation(input, tabId) {
       version: "0.1.0"
     }
   };
-
-  debugLog("saveAnnotation:start", {
-    id: annotation.id,
-    url: annotation.url,
-    title: annotation.title,
-    quoteLength: annotation.quote.length,
-    tabId
-  });
-  await upsertMarkdownPage(settings, annotation);
-  await cacheAnnotation(annotation);
-  await clearDraft(tabId);
-  await updateBadgeForUrl(tabId, annotation.url);
-
-  if (tabId != null) {
-    try {
-      await chrome.tabs.sendMessage(tabId, { type: "ANNOTATION_SAVED", annotation });
-    } catch {
-      // The content script may be unavailable on restricted pages.
-    }
-  }
-
-  return annotation;
 }
 
 async function upsertMarkdownPage(settings, annotation) {
+  const maxAttempts = 3;
+  for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+    try {
+      return await upsertMarkdownPageOnce(settings, annotation, attempt);
+    } catch (error) {
+      if (!isNonFastForwardError(error) || attempt >= maxAttempts) {
+        throw error;
+      }
+
+      debugWarn("upsertMarkdownPage:retryNonFastForward", {
+        id: annotation.id,
+        url: annotation.url,
+        attempt,
+        maxAttempts,
+        message: formatError(error)
+      });
+      await delay(250 * attempt);
+    }
+  }
+
+  throw new Error("Could not update GitHub after branch ref changed.");
+}
+
+async function upsertMarkdownPageOnce(settings, annotation, attempt) {
+  const remoteAnnotation = stripSyncMetadata(annotation);
   const expectedPath = await markdownFilePath(settings, annotation);
   const exactFile = await readMarkdownFile(settings, expectedPath);
   const exactFileMatchesUrl = exactFile && urlMatches(markdownFrontmatterUrl(exactFile.content), annotation.url);
@@ -298,7 +356,7 @@ async function upsertMarkdownPage(settings, annotation) {
   const existingAnnotations = await readSidecarAnnotations(settings, annotation.url);
   const annotations = existingAnnotations
     .filter((item) => item.id !== annotation.id)
-    .concat(annotation);
+    .concat(remoteAnnotation);
   const sorted = sortAnnotations(annotations);
   const sidecarPath = await sidecarFilePath(settings, annotation.url);
   debugLog("upsertMarkdownPage:paths", {
@@ -308,7 +366,8 @@ async function upsertMarkdownPage(settings, annotation) {
     existingPath: existing?.path || null,
     exactFilePath: exactFile?.path || null,
     exactFileMatchesUrl,
-    annotationCount: sorted.length
+    annotationCount: sorted.length,
+    attempt
   });
   const sidecarPayload = {
     schemaVersion: 1,
@@ -344,6 +403,169 @@ async function upsertMarkdownPage(settings, annotation) {
   return commitTreeUpdate(settings, "Add annotation for link", tree);
 }
 
+async function queueAnnotationSync(annotation) {
+  const queue = await getSyncQueue();
+  const existing = queue[annotation.id] || {};
+  const now = new Date().toISOString();
+  queue[annotation.id] = {
+    id: annotation.id,
+    url: annotation.url,
+    annotation: markAnnotationSyncState(annotation, "pending", {
+      attempts: existing.attempts || annotation.syncAttempts || 0
+    }),
+    status: "pending",
+    attempts: existing.attempts || annotation.syncAttempts || 0,
+    error: "",
+    queuedAt: existing.queuedAt || now,
+    updatedAt: now
+  };
+  await saveSyncQueue(queue);
+  debugLog("queueAnnotationSync", { id: annotation.id, url: annotation.url });
+  await scheduleSyncQueue();
+  syncQueuedAnnotations().catch((error) => debugWarn("queueAnnotationSync:backgroundFailed", { message: formatError(error) }));
+}
+
+async function retryAnnotationSync(id, url) {
+  if (!id) {
+    throw new Error("Missing annotation id.");
+  }
+
+  const queue = await getSyncQueue();
+  let job = queue[id];
+  let annotation = job?.annotation || null;
+  if (!annotation && url) {
+    annotation = (await getCachedAnnotations(url)).find((item) => item.id === id) || null;
+  }
+  if (!annotation) {
+    throw new Error("Could not find annotation to retry.");
+  }
+
+  const queued = markAnnotationSyncState(annotation, "pending", {
+    attempts: job?.attempts || annotation.syncAttempts || 0
+  });
+  await cacheAnnotation(queued);
+  await queueAnnotationSync(queued);
+  await notifyAnnotationSyncUpdated(queued);
+  return queued;
+}
+
+async function syncQueuedAnnotations() {
+  if (syncQueueRunning) {
+    debugLog("syncQueuedAnnotations:alreadyRunning");
+    return;
+  }
+
+  syncQueueRunning = true;
+  try {
+    await syncQueuedAnnotationsOnce();
+  } finally {
+    syncQueueRunning = false;
+  }
+}
+
+async function syncQueuedAnnotationsOnce() {
+  const queue = await getSyncQueue();
+  const jobs = Object.values(queue).filter((job) => job?.id && (job.status === "pending" || job.status === "syncing"));
+  if (!jobs.length) {
+    return;
+  }
+
+  debugLog("syncQueuedAnnotations:start", { count: jobs.length });
+  for (const job of jobs) {
+    await syncQueueJob(job.id);
+  }
+}
+
+async function syncQueueJob(id) {
+  const settings = await getReadySettings();
+  const queue = await getSyncQueue();
+  const job = queue[id];
+  if (!job?.annotation) {
+    return;
+  }
+
+  const attempts = (job.attempts || 0) + 1;
+  const syncing = markAnnotationSyncState(job.annotation, "syncing", { attempts });
+  queue[id] = {
+    ...job,
+    annotation: syncing,
+    status: "syncing",
+    attempts,
+    error: "",
+    updatedAt: new Date().toISOString()
+  };
+  await saveSyncQueue(queue);
+  await cacheAnnotation(syncing);
+  await notifyAnnotationSyncUpdated(syncing);
+
+  try {
+    await withGitHubWriteLock(() => upsertMarkdownPage(settings, syncing));
+    const synced = markAnnotationSyncState(syncing, "synced", { attempts });
+    const latestQueue = await getSyncQueue();
+    delete latestQueue[id];
+    await saveSyncQueue(latestQueue);
+    await cacheAnnotation(synced);
+    await notifyAnnotationSyncUpdated(synced);
+    debugLog("syncQueueJob:synced", { id, url: synced.url, attempts });
+  } catch (error) {
+    const failed = markAnnotationSyncState(syncing, "failed", {
+      attempts,
+      error: formatError(error)
+    });
+    const latestQueue = await getSyncQueue();
+    latestQueue[id] = {
+      ...job,
+      annotation: failed,
+      status: "failed",
+      attempts,
+      error: formatError(error),
+      updatedAt: new Date().toISOString()
+    };
+    await saveSyncQueue(latestQueue);
+    await cacheAnnotation(failed);
+    await notifyAnnotationSyncUpdated(failed);
+    debugWarn("syncQueueJob:failed", { id, url: failed.url, attempts, error: formatError(error) });
+  }
+}
+
+async function getSyncQueue() {
+  const data = await chrome.storage.local.get(SYNC_QUEUE_KEY);
+  return data[SYNC_QUEUE_KEY] && typeof data[SYNC_QUEUE_KEY] === "object" ? data[SYNC_QUEUE_KEY] : {};
+}
+
+async function saveSyncQueue(queue) {
+  await chrome.storage.local.set({ [SYNC_QUEUE_KEY]: queue });
+}
+
+async function scheduleSyncQueue() {
+  const queue = await getSyncQueue();
+  const hasWork = Object.values(queue).some((job) => job?.status === "pending" || job?.status === "syncing");
+  if (!hasWork) {
+    return;
+  }
+
+  try {
+    await chrome.alarms?.create(SYNC_ALARM_NAME, { delayInMinutes: 0.1 });
+  } catch (error) {
+    debugWarn("scheduleSyncQueue:failed", { message: formatError(error) });
+  }
+}
+
+async function withGitHubWriteLock(callback) {
+  const previous = githubWriteLock;
+  let release;
+  githubWriteLock = new Promise((resolve) => {
+    release = resolve;
+  });
+
+  await previous.catch(() => {});
+  try {
+    return await callback();
+  } finally {
+    release();
+  }
+}
+
 async function listRemoteAnnotations(url, title = "") {
   if (!url) {
     return [];
@@ -364,8 +586,7 @@ async function listRemoteAnnotations(url, title = "") {
       url,
       count: directSidecarAnnotations.length
     });
-    await replaceCachedAnnotations(url, directSidecarAnnotations);
-    return directSidecarAnnotations;
+    return replaceCachedAnnotations(url, directSidecarAnnotations);
   }
 
   const expectedPath = await markdownFilePath(settings, { url, title });
@@ -376,8 +597,7 @@ async function listRemoteAnnotations(url, title = "") {
 
   if (!file) {
     debugLog("listRemoteAnnotations:noMarkdownFile", { url, expectedPath });
-    await replaceCachedAnnotations(url, []);
-    return [];
+    return replaceCachedAnnotations(url, []);
   }
 
   const annotations = await readSidecarAnnotationsForMarkdown(settings, file);
@@ -391,8 +611,7 @@ async function listRemoteAnnotations(url, title = "") {
     });
     return cached;
   }
-  await replaceCachedAnnotations(url, annotations);
-  return annotations;
+  return replaceCachedAnnotations(url, annotations);
 }
 
 async function listRemoteAnnotationsForTab(url, title, tabId) {
@@ -422,6 +641,27 @@ async function updateBadgeForUrl(tabId, url) {
 
   const annotations = await getCachedAnnotations(url);
   await updateBadge(tabId, annotations.length);
+}
+
+async function notifyAnnotationSyncUpdated(annotation) {
+  try {
+    await chrome.runtime.sendMessage({ type: "ANNOTATION_SYNC_UPDATED", annotation });
+  } catch {
+    // The native side panel may not be open.
+  }
+
+  try {
+    const tabs = await chrome.tabs.query({ url: ["http://*/*", "https://*/*"] });
+    await Promise.allSettled(tabs.map(async (tab) => {
+      if (tab.id == null || !urlMatches(tab.url, annotation.url)) {
+        return;
+      }
+      await updateBadgeForUrl(tab.id, annotation.url);
+      await chrome.tabs.sendMessage(tab.id, { type: "ANNOTATION_SYNC_UPDATED", annotation });
+    }));
+  } catch {
+    // Content scripts will pick the status up from cache on the next refresh.
+  }
 }
 
 async function updateBadge(tabId, count) {
@@ -685,7 +925,6 @@ async function renderMarkdownPage(page, annotations) {
     "---",
     "doc_type: hypothesis-highlights",
     `url: ${yamlString(url)}`,
-    `title: ${yamlString(title)}`,
     `author: ${yamlString(host)}`,
     `site: ${yamlString(host)}`,
     `reference: ${yamlString(url)}`,
@@ -705,11 +944,8 @@ async function renderMarkdownPage(page, annotations) {
   return `${frontmatter}
 ## Metadata
 - Author: [${host}]()
-- Title: ${title}
 - Reference: ${url}
 - Category: #article
-
-## Page Notes
 
 ## Highlights
 ${annotations.map(renderHighlightMarkdown).join("\n")}
@@ -754,7 +990,14 @@ async function cacheAnnotation(annotation) {
 
 async function replaceCachedAnnotations(url, annotations) {
   const key = await cacheKey(url);
-  await chrome.storage.local.set({ [key]: sortAnnotations(annotations) });
+  const data = await chrome.storage.local.get(key);
+  const existing = Array.isArray(data[key]) ? data[key] : [];
+  const remote = annotations.map((annotation) => markAnnotationSyncState(annotation, "synced"));
+  const remoteIds = new Set(remote.map((annotation) => annotation.id));
+  const localUnsynced = existing.filter((annotation) => annotation.id && !remoteIds.has(annotation.id) && isUnsyncedAnnotation(annotation));
+  const merged = sortAnnotations(remote.concat(localUnsynced));
+  await chrome.storage.local.set({ [key]: merged });
+  return merged;
 }
 
 async function getCachedAnnotations(url) {
@@ -768,6 +1011,34 @@ async function getCachedAnnotations(url) {
 
 function sortAnnotations(annotations) {
   return annotations.slice().sort((a, b) => (b.createdAt || "").localeCompare(a.createdAt || ""));
+}
+
+function markAnnotationSyncState(annotation, status, details = {}) {
+  const now = new Date().toISOString();
+  return {
+    ...annotation,
+    syncStatus: status,
+    syncError: details.error || "",
+    syncAttempts: details.attempts ?? annotation.syncAttempts ?? 0,
+    syncUpdatedAt: now,
+    syncSyncedAt: status === "synced" ? now : annotation.syncSyncedAt || ""
+  };
+}
+
+function isUnsyncedAnnotation(annotation) {
+  return annotation?.syncStatus === "pending" || annotation?.syncStatus === "syncing" || annotation?.syncStatus === "failed";
+}
+
+function stripSyncMetadata(annotation) {
+  const {
+    syncStatus,
+    syncError,
+    syncAttempts,
+    syncUpdatedAt,
+    syncSyncedAt,
+    ...clean
+  } = annotation || {};
+  return clean;
 }
 
 async function markdownFilePath(settings, page, options = {}) {
@@ -1079,6 +1350,14 @@ function formatError(error) {
     return "Unknown error.";
   }
   return error.message || String(error);
+}
+
+function isNonFastForwardError(error) {
+  return error?.status === 422 && /fast forward/i.test(error.message || error.payload?.message || "");
+}
+
+function delay(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
 function debugLog(label, details = {}) {

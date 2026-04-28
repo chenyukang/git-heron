@@ -566,6 +566,43 @@
   gap: 5px;
 }
 
+.gh-annotator-panel__sync {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+}
+
+.gh-annotator-panel__sync-pill {
+  flex: 0 0 auto;
+  padding: 2px 6px;
+  border-radius: 999px;
+  background: #dcfce7;
+  color: #166534;
+  font-size: 11px;
+  font-weight: 700;
+}
+
+.gh-annotator-panel__sync-pill[data-status="pending"],
+.gh-annotator-panel__sync-pill[data-status="syncing"] {
+  background: #eef2ff;
+  color: #3730a3;
+}
+
+.gh-annotator-panel__sync-pill[data-status="failed"] {
+  background: #fff1f2;
+  color: #be123c;
+}
+
+.gh-annotator-panel__sync-error {
+  min-width: 0;
+  overflow: hidden;
+  color: #be123c;
+  font-size: 11px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .gh-annotator-panel__tag {
   padding: 2px 6px;
   border-radius: 999px;

@@ -8,7 +8,8 @@
   const DEBUG = true;
   const DEFAULT_USER_SETTINGS = {
     showSelectionToolbar: true,
-    activationShortcut: "Ctrl+E"
+    activationShortcut: "Ctrl+E",
+    backgroundSync: false
   };
 
   let toolbar = null;
@@ -45,6 +46,12 @@
     if (message?.type === "ANNOTATION_SAVED") {
       applyAnnotations([message.annotation]);
       sendResponse({ applied: true });
+      return false;
+    }
+
+    if (message?.type === "ANNOTATION_SYNC_UPDATED") {
+      updateLocalAnnotation(message.annotation);
+      sendResponse({ updated: true });
       return false;
     }
 
@@ -302,9 +309,12 @@
   }
 
   async function activateDraft(draft) {
-    hideToolbar();
-    const tempHighlightId = showDraftHighlight(draft);
-    openEditor(draft, { tempHighlightId });
+    let tempHighlightId = "";
+    withPreservedScroll(() => {
+      hideToolbar();
+      tempHighlightId = showDraftHighlight(draft);
+      openEditor(draft, { tempHighlightId });
+    });
     try {
       await sendRuntimeMessage({ type: "CAPTURE_DRAFT", draft });
     } catch (error) {
@@ -326,7 +336,7 @@
     setEditorStatus("");
     selectEditorColor(options.color || editorColor);
     editor.root.hidden = false;
-    editor.note.focus();
+    focusWithoutScrolling(editor.note);
   }
 
   function openAnnotationEditor(annotation) {
@@ -471,6 +481,7 @@
       branch: settings.branch,
       basePath: settings.basePath,
       showSelectionToolbar: settings.showSelectionToolbar,
+      backgroundSync: settings.backgroundSync,
       activationShortcut: settings.activationShortcut,
       list
     };
@@ -497,6 +508,7 @@
     const branch = panelInput("Branch", "text", "main");
     const basePath = panelInput("Path", "text", "annotations");
     const showSelectionToolbar = panelCheckbox("Show floating button");
+    const backgroundSync = panelCheckbox("Background sync");
     const activationShortcut = panelInput("Shortcut", "text", "Ctrl+E");
 
     const actions = document.createElement("div");
@@ -507,7 +519,7 @@
     test.addEventListener("click", testPagePanelSettings);
     actions.append(save, test);
 
-    root.append(headingRow, token.label, repo.label, branch.label, basePath.label, showSelectionToolbar.label, activationShortcut.label, actions);
+    root.append(headingRow, token.label, repo.label, branch.label, basePath.label, showSelectionToolbar.label, backgroundSync.label, activationShortcut.label, actions);
 
     return {
       root,
@@ -517,6 +529,7 @@
       branch: branch.input,
       basePath: basePath.input,
       showSelectionToolbar: showSelectionToolbar.input,
+      backgroundSync: backgroundSync.input,
       activationShortcut: activationShortcut.input
     };
   }
@@ -526,6 +539,7 @@
     pagePanel.branch.value = settings.branch || "main";
     pagePanel.basePath.value = settings.basePath || "annotations";
     pagePanel.showSelectionToolbar.checked = settings.showSelectionToolbar ?? true;
+    pagePanel.backgroundSync.checked = settings.backgroundSync ?? false;
     pagePanel.activationShortcut.value = settings.activationShortcut || "Ctrl+E";
     pagePanel.token.placeholder = settings.hasToken ? "Saved token" : "github_pat_...";
     pagePanel.settingsState.textContent = settings.hasToken && settings.repo ? "Saved" : "Not connected";
@@ -577,6 +591,7 @@
       branch: pagePanel.branch.value.trim() || "main",
       basePath: pagePanel.basePath.value.trim() || "annotations",
       showSelectionToolbar: pagePanel.showSelectionToolbar.checked,
+      backgroundSync: pagePanel.backgroundSync.checked,
       activationShortcut: pagePanel.activationShortcut.value.trim() || "Ctrl+E"
     };
     const token = pagePanel.token.value.trim();
@@ -653,6 +668,21 @@
       item.append(tags);
     }
 
+    const sync = document.createElement("div");
+    sync.className = "gh-annotator-panel__sync";
+    const syncPill = document.createElement("span");
+    syncPill.className = "gh-annotator-panel__sync-pill";
+    syncPill.dataset.status = annotation.syncStatus || "synced";
+    syncPill.textContent = syncStatusLabel(annotation.syncStatus);
+    sync.append(syncPill);
+    if (annotation.syncStatus === "failed" && annotation.syncError) {
+      const error = document.createElement("span");
+      error.className = "gh-annotator-panel__sync-error";
+      error.textContent = annotation.syncError;
+      sync.append(error);
+    }
+    item.append(sync);
+
     const itemActions = document.createElement("div");
     itemActions.className = "gh-annotator-panel__item-actions";
 
@@ -662,12 +692,65 @@
     edit.addEventListener("click", () => openAnnotationEditor(annotation));
 
     itemActions.append(focus, edit);
+    if (annotation.syncStatus === "failed") {
+      const retry = panelButton("Retry");
+      retry.addEventListener("click", () => retryAnnotationSync(annotation));
+      itemActions.append(retry);
+    }
     item.append(itemActions);
     return item;
   }
 
   function sortedAnnotations() {
     return [...annotationsById.values()].sort((a, b) => (b.createdAt || "").localeCompare(a.createdAt || ""));
+  }
+
+  function updateLocalAnnotation(annotation) {
+    if (!annotation?.id) {
+      return;
+    }
+
+    annotationsById.set(annotation.id, annotation);
+    updateAnnotationMarks(annotation);
+    renderPagePanelAnnotations();
+    if (annotation.syncStatus === "failed") {
+      setPagePanelStatus(`Sync failed: ${annotation.syncError || "Unknown error."}`, "error");
+    }
+  }
+
+  async function retryAnnotationSync(annotation) {
+    if (!annotation?.id) {
+      return;
+    }
+
+    setPagePanelStatus("Retrying sync...");
+    try {
+      const response = await sendRuntimeMessage({
+        type: "RETRY_ANNOTATION_SYNC",
+        id: annotation.id,
+        url: annotation.url || location.href
+      });
+      if (!response?.ok) {
+        throw new Error(response?.error || "Could not retry sync.");
+      }
+      updateLocalAnnotation(response.annotation);
+      setPagePanelStatus("Queued for GitHub sync.", "success");
+    } catch (error) {
+      setPagePanelStatus(error?.message || String(error), "error");
+    }
+  }
+
+  function syncStatusLabel(status) {
+    if (status === "pending") {
+      return "Queued";
+    }
+    if (status === "syncing") {
+      return "Syncing";
+    }
+    if (status === "failed") {
+      return "Failed";
+    }
+    return "Synced";
   }
 
   function setPagePanelStatus(message, kind = "") {
@@ -900,7 +983,8 @@
       }
       updateAnnotationMarks(response.annotation);
       renderPagePanelAnnotations();
-      setEditorStatus("Saved to GitHub.", "success");
+      const syncStatus = response.annotation.syncStatus || "synced";
+      setEditorStatus(syncStatus === "synced" ? "Saved to GitHub." : "Queued for GitHub sync.", "success");
       window.setTimeout(closeEditor, 450);
     } catch (error) {
       setEditorStatus(error?.message || String(error), "error");
@@ -1423,7 +1507,8 @@
     userSettings = {
       ...userSettings,
       showSelectionToolbar: settings.showSelectionToolbar ?? userSettings.showSelectionToolbar,
-      activationShortcut: settings.activationShortcut || userSettings.activationShortcut
+      activationShortcut: settings.activationShortcut || userSettings.activationShortcut,
+      backgroundSync: settings.backgroundSync ?? userSettings.backgroundSync
     };
     if (!userSettings.showSelectionToolbar) {
       hideToolbar();
@@ -1433,6 +1518,41 @@
 
   function shouldShowSelectionToolbar() {
     return userSettingsLoaded && userSettings.showSelectionToolbar;
+  }
+
+  function withPreservedScroll(callback) {
+    const position = currentScrollPosition();
+    const result = callback();
+    restoreScrollPosition(position);
+    window.requestAnimationFrame(() => restoreScrollPosition(position));
+    return result;
+  }
+
+  function focusWithoutScrolling(node) {
+    const position = currentScrollPosition();
+    try {
+      node.focus({ preventScroll: true });
+    } catch (_error) {
+      node.focus();
+    }
+    restoreScrollPosition(position);
+    window.requestAnimationFrame(() => restoreScrollPosition(position));
+  }
+
+  function currentScrollPosition() {
+    return {
+      x: window.scrollX,
+      y: window.scrollY
+    };
+  }
+
+  function restoreScrollPosition(position) {
+    if (!position) {
+      return;
+    }
+    if (window.scrollX !== position.x || window.scrollY !== position.y) {
+      window.scrollTo(position.x, position.y);
+    }
   }
 
   function shortcutMatches(event, shortcut) {

@@ -34,6 +34,7 @@ The extension stores the token in `chrome.storage.local` and sets the storage ac
 
 The extension uses an in-page right-side panel because Chrome controls the placement of its native side panel. Restricted browser pages may still fall back to the native side panel.
 In settings, the floating selection button can be disabled. When it is disabled, use the configured shortcut to annotate the current selection. The default shortcut is `Ctrl+E`.
+Settings also include `Background sync`. When enabled, saving an annotation updates the local page immediately, queues the GitHub write in the background, and shows per-annotation sync status with a retry action for failed syncs.
 
 Each page is committed as a readable Markdown file. The filename uses the current date plus the page title truncated to 20 characters:
 
@@ -42,7 +43,7 @@ annotations/
   2026-04-28-link-title.md
 ```
 
-When an older dated file for the same URL already exists, the extension writes the updated content to today's filename and removes the older file. The Markdown file includes YAML frontmatter for search and page metadata plus visible `Metadata`, `Page Notes`, and `Highlights` sections.
+When an older dated file for the same URL already exists, the extension writes the updated content to today's filename and removes the older file. The Markdown file includes YAML frontmatter for search and page metadata plus visible `Metadata` and `Highlights` sections.
 
 The selector data needed to restore highlights is stored separately in:
 
@@ -54,7 +55,7 @@ annotations/
 
 The Markdown frontmatter only keeps a short `annotation_data` pointer to that sidecar file.
 
-Saving an annotation updates the Markdown file, the sidecar metadata file, and any old dated filename removal in one Git commit.
+Saving an annotation updates the Markdown file, the sidecar metadata file, and any old dated filename removal in one Git commit. With background sync enabled, that commit is created by the background queue after the annotation is saved locally.
 
 ## Current scope
 

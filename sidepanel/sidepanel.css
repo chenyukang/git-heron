@@ -326,6 +326,44 @@ textarea:focus {
   font-size: 12px;
 }
 
+.annotation-actions,
+.annotation-sync {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+}
+
+.sync-pill {
+  flex: 0 0 auto;
+  padding: 2px 6px;
+  border-radius: 999px;
+  background: #dcfce7;
+  color: #166534;
+  font-size: 11px;
+  font-weight: 700;
+}
+
+.sync-pill[data-status="pending"],
+.sync-pill[data-status="syncing"] {
+  background: #eef2ff;
+  color: #3730a3;
+}
+
+.sync-pill[data-status="failed"] {
+  background: #fff1f2;
+  color: #be123c;
+}
+
+.sync-error {
+  min-width: 0;
+  overflow: hidden;
+  color: #be123c;
+  font-size: 11px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .annotation-quote {
   color: #1f2937;
   font-weight: 650;
