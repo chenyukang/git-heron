@@ -1,5 +1,7 @@
 # GitHub Web Annotator
 
+> Web highlights and clippings, synced to GitHub as Markdown.
+
 Github Web Annotator is [web.hypothes](https://web.hypothes.is/) like chrome extension, but instead of saving annotations to a central server, it saves them as Markdown files in a GitHub repository. This allows users to keep their annotations private, version-controlled, and easily accessible alongside their other code or notes.
 
 You just need one Github repo and a token with write access to that repo, everything works!
@@ -9,11 +11,7 @@ You just need one Github repo and a token with write access to that repo, everyt
 1. Open `chrome://extensions`.
 2. Enable Developer mode.
 3. Choose **Load unpacked**.
-4. Select this directory: `/path/to/github-hypo`.
-
-## Screenshot
-
-
+4. Select this directory: `/path/to/git-heron`.
 
 ## GitHub token
 
