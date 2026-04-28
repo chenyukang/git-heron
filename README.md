@@ -65,7 +65,9 @@ Saving a clipping writes a separate Markdown file to the configured clip path. W
 - Stores quote, prefix/suffix context, note, tags, color, URL, and title.
 - Automatically restores page highlights from GitHub when a page opens.
 - Shows the current page annotation count as a badge on the extension button.
+- Shows status on the extension badge when the current page has been clipped and synced, unless annotations are already using the badge for their count.
 - Caches page annotations locally and can sync them back from GitHub.
+- Stores recently used tags locally and shows them as quick-select chips when adding notes.
 - Uses the vendored Defuddle browser bundle for main-content clipping.
 - Clicking a highlight opens the saved note in an in-page extension panel and also tries to open the Chrome side panel.
 - PDF support is intentionally left for a later phase because browser PDF viewers are not ordinary pages for content script injection.

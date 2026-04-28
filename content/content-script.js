@@ -355,7 +355,8 @@
     editor.title.textContent = options.mode === "edit" ? "Edit annotation" : "New annotation";
     editor.quote.textContent = draft.selector.exact;
     editor.note.value = options.note || "";
-    editor.tags.value = options.tags || "";
+    setTagPickerValue(editor.tags, parseTags(options.tags || ""));
+    loadRecentTagsForPicker(editor.tags);
     editor.tempHighlightId = options.tempHighlightId || null;
     setEditorStatus("");
     selectEditorColor(options.color || editorColor);
@@ -1218,11 +1219,8 @@
 
     const tagLabel = document.createElement("label");
     tagLabel.textContent = "Tags";
-    const tags = document.createElement("input");
-    tags.type = "text";
-    tags.placeholder = "reading, idea";
-    tags.addEventListener("keydown", handleEditorShortcut);
-    tagLabel.append(tags);
+    const tags = createTagPicker("gh-annotator-editor", saveEditorAnnotation);
+    tagLabel.append(tags.root);
 
     const colors = document.createElement("div");
     colors.className = "gh-annotator-editor__colors";
@@ -1288,7 +1286,7 @@
     const annotation = {
       ...editor.draft,
       note: editor.note.value.trim(),
-      tags: parseTags(editor.tags.value),
+      tags: tagPickerTags(editor.tags),
       color: editorColor
     };
 
@@ -1326,6 +1324,156 @@
     }
   }
 
+  function createTagPicker(prefix, onSubmit) {
+    const root = document.createElement("div");
+    root.className = `${prefix}__tag-picker`;
+
+    const selected = document.createElement("div");
+    selected.className = `${prefix}__selected-tags`;
+
+    const input = document.createElement("input");
+    input.type = "text";
+    input.placeholder = "Add tag";
+    input.autocomplete = "off";
+    input.spellcheck = false;
+
+    const recent = document.createElement("div");
+    recent.className = `${prefix}__recent-tags`;
+    recent.hidden = true;
+
+    const picker = {
+      root,
+      selected,
+      input,
+      recent,
+      selectedTags: [],
+      recentTags: [],
+      prefix
+    };
+
+    root.addEventListener("click", () => input.focus());
+    input.addEventListener("blur", () => commitTagPickerInput(picker));
+    input.addEventListener("keydown", (event) => {
+      event.stopPropagation();
+      if (event.key === "Enter" && (event.ctrlKey || event.metaKey)) {
+        event.preventDefault();
+        commitTagPickerInput(picker);
+        onSubmit?.();
+        return;
+      }
+      if (event.key === "Enter" || event.key === ",") {
+        event.preventDefault();
+        commitTagPickerInput(picker);
+        return;
+      }
+      if (event.key === "Backspace" && !input.value && picker.selectedTags.length) {
+        event.preventDefault();
+        removeTagFromPicker(picker, picker.selectedTags[picker.selectedTags.length - 1]);
+      }
+    });
+
+    root.append(selected, input, recent);
+    renderTagPicker(picker);
+    return picker;
+  }
+
+  async function loadRecentTagsForPicker(picker) {
+    try {
+      const response = await sendRuntimeMessage({ type: "GET_RECENT_TAGS" });
+      picker.recentTags = normalizeTagList(response.tags || []);
+      renderTagPicker(picker);
+    } catch (error) {
+      debugWarn("loadRecentTagsForPicker:failed", { message: error?.message || String(error) });
+    }
+  }
+
+  function setTagPickerValue(picker, tags) {
+    picker.input.value = "";
+    picker.selectedTags = normalizeTagList(tags);
+    renderTagPicker(picker);
+  }
+
+  function tagPickerTags(picker) {
+    commitTagPickerInput(picker);
+    return picker.selectedTags.slice();
+  }
+
+  function commitTagPickerInput(picker) {
+    const tags = parseTags(picker.input.value);
+    if (!tags.length) {
+      return;
+    }
+    picker.input.value = "";
+    tags.forEach((tag) => addTagToPicker(picker, tag));
+  }
+
+  function addTagToPicker(picker, tag) {
+    const normalized = normalizeTagList([tag])[0];
+    if (!normalized) {
+      return;
+    }
+    if (!picker.selectedTags.some((item) => item.toLowerCase() === normalized.toLowerCase())) {
+      picker.selectedTags.push(normalized);
+    }
+    renderTagPicker(picker);
+    rememberTagsForPicker(picker, [normalized]);
+  }
+
+  async function rememberTagsForPicker(picker, tags) {
+    try {
+      const response = await sendRuntimeMessage({ type: "REMEMBER_TAGS", tags });
+      picker.recentTags = normalizeTagList(response.tags || []);
+      renderTagPicker(picker);
+    } catch (error) {
+      debugWarn("rememberTagsForPicker:failed", { message: error?.message || String(error) });
+    }
+  }
+
+  function removeTagFromPicker(picker, tag) {
+    const key = String(tag || "").toLowerCase();
+    picker.selectedTags = picker.selectedTags.filter((item) => item.toLowerCase() !== key);
+    renderTagPicker(picker);
+  }
+
+  function renderTagPicker(picker) {
+    picker.selected.textContent = "";
+    for (const tag of picker.selectedTags) {
+      const chip = document.createElement("span");
+      chip.className = `${picker.prefix}__tag-chip`;
+      const text = document.createElement("span");
+      text.textContent = tag;
+      const remove = document.createElement("button");
+      remove.type = "button";
+      remove.textContent = "x";
+      remove.title = `Remove ${tag}`;
+      remove.setAttribute("aria-label", `Remove ${tag}`);
+      remove.addEventListener("click", (event) => {
+        event.preventDefault();
+        event.stopPropagation();
+        removeTagFromPicker(picker, tag);
+      });
+      chip.append(text, remove);
+      picker.selected.append(chip);
+    }
+
+    picker.recent.textContent = "";
+    const selected = new Set(picker.selectedTags.map((tag) => tag.toLowerCase()));
+    const candidates = picker.recentTags.filter((tag) => !selected.has(tag.toLowerCase())).slice(0, 12);
+    picker.recent.hidden = !candidates.length;
+    for (const tag of candidates) {
+      const button = document.createElement("button");
+      button.type = "button";
+      button.textContent = tag;
+      button.addEventListener("click", (event) => {
+        event.preventDefault();
+        event.stopPropagation();
+        addTagToPicker(picker, tag);
+        picker.input.focus();
+      });
+      picker.recent.append(button);
+    }
+  }
+
   function setEditorStatus(message, kind = "") {
     if (!editor) {
       return;
@@ -1340,10 +1488,32 @@
   }
 
   function parseTags(value) {
-    return value
+    if (Array.isArray(value)) {
+      return normalizeTagList(value);
+    }
+    return String(value || "")
       .split(",")
-      .map((tag) => tag.trim())
-      .filter(Boolean);
+      .flatMap((item) => item.split(/\s+/))
+      .filter(Boolean)
+      .map((tag) => tag.trim());
+  }
+
+  function normalizeTagList(tags) {
+    const seen = new Set();
+    const normalized = [];
+    for (const raw of tags) {
+      const tag = String(raw || "")
+        .trim()
+        .replace(/^#+/, "")
+        .replace(/\s+/g, "-");
+      const key = tag.toLowerCase();
+      if (!tag || seen.has(key)) {
+        continue;
+      }
+      seen.add(key);
+      normalized.push(tag);
+    }
+    return normalized;
   }
 
   async function announceReady() {

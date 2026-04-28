@@ -1,6 +1,8 @@
 const SETTINGS_KEY = "settings";
 const DRAFT_PREFIX = "draft:";
 const CACHE_PREFIX = "cache:";
+const CLIP_SYNCED_PREFIX = "clipSynced:";
+const RECENT_TAGS_KEY = "recentTags";
 const SYNC_QUEUE_KEY = "syncQueue";
 const CLIP_SYNC_QUEUE_KEY = "clipSyncQueue";
 const SYNC_TASK_HISTORY_KEY = "syncTaskHistory";
@@ -103,6 +105,12 @@ async function handleMessage(message, sender) {
       await clearDraft(message.tabId);
       return {};
 
+    case "GET_RECENT_TAGS":
+      return { tags: await getRecentTags() };
+
+    case "REMEMBER_TAGS":
+      return { tags: await rememberRecentTags(message.tags || []) };
+
     case "CONTENT_READY":
       return contentReady(message.page, sender?.tab?.id);
 
@@ -116,7 +124,7 @@ async function handleMessage(message, sender) {
       return { annotation: await saveAnnotation(message.annotation, message.tabId ?? sender?.tab?.id) };
 
     case "SAVE_CLIPPING":
-      return { clipping: await saveClipping(message.clipping) };
+      return { clipping: await saveClipping(message.clipping, sender?.tab?.id) };
 
     case "RETRY_ANNOTATION_SYNC":
       return { annotation: await retryAnnotationSync(message.id, message.url) };
@@ -268,6 +276,26 @@ async function clearDraft(tabId) {
   }
 }
 
+async function getRecentTags() {
+  const data = await chrome.storage.local.get(RECENT_TAGS_KEY);
+  return normalizeTags(Array.isArray(data[RECENT_TAGS_KEY]) ? data[RECENT_TAGS_KEY] : []);
+}
+
+async function rememberRecentTags(tags = []) {
+  const incoming = normalizeTags(tags);
+  if (!incoming.length) {
+    return getRecentTags();
+  }
+
+  const existing = await getRecentTags();
+  const lowerIncoming = new Set(incoming.map((tag) => tag.toLowerCase()));
+  const next = incoming
+    .concat(existing.filter((tag) => !lowerIncoming.has(tag.toLowerCase())))
+    .slice(0, 20);
+  await chrome.storage.local.set({ [RECENT_TAGS_KEY]: next });
+  return next;
+}
+
 async function notifyDraftUpdated(tabId, draft) {
   try {
     await chrome.runtime.sendMessage({ type: "DRAFT_UPDATED", tabId, draft });
@@ -278,7 +306,7 @@ async function notifyDraftUpdated(tabId, draft) {
 
 async function contentReady(page, tabId) {
   const annotations = await loadPageAnnotationsForContent(page?.url, page?.title);
-  await updateBadge(tabId, annotations.length);
+  await updatePageBadge(tabId, page?.url, annotations.length);
   return { annotations, settings: sanitizeSettings(await getSettings()) };
 }
 
@@ -310,6 +338,7 @@ async function saveAnnotation(input, tabId) {
     await cacheAnnotation(savedAnnotation);
   }
 
+  await rememberRecentTags(savedAnnotation.tags);
   await clearDraft(tabId);
   await updateBadgeForUrl(tabId, annotation.url);
 
@@ -324,7 +353,7 @@ async function saveAnnotation(input, tabId) {
   return savedAnnotation;
 }
 
-async function saveClipping(input = {}) {
+async function saveClipping(input = {}, tabId) {
   const settings = await getReadySettings();
   const title = collapseWhitespace(input.title || getUrlHost(input.url) || "Untitled page") || "Untitled page";
   const markdown = String(input.markdown || "").trim();
@@ -364,7 +393,10 @@ async function saveClipping(input = {}) {
   }
 
   await withGitHubWriteLock(() => writeClippingToGitHub(settings, clipping));
-  return publicClipping(markClippingSyncState(clipping, "synced"));
+  const synced = markClippingSyncState(clipping, "synced");
+  await markClippingSynced(synced);
+  await updateBadgeForUrl(tabId, synced.url);
+  return publicClipping(synced);
 }
 
 async function writeClippingToGitHub(settings, clipping) {
@@ -388,7 +420,7 @@ function buildAnnotation(input) {
     selector: input.selector,
     quote: input.selector.exact,
     note: input.note || "",
-    tags: Array.isArray(input.tags) ? input.tags : [],
+    tags: normalizeTags(input.tags),
     color: input.color || "yellow",
     createdAt: input.createdAt || new Date().toISOString(),
     updatedAt: new Date().toISOString(),
@@ -703,6 +735,7 @@ async function syncClipQueueJob(id) {
     const latestQueue = await getClipSyncQueue();
     delete latestQueue[id];
     await saveClipSyncQueue(latestQueue);
+    await markClippingSynced(synced);
     await rememberSyncTask(syncTaskFromClipping("clipping", synced, {
       status: "synced",
       attempts,
@@ -947,7 +980,7 @@ async function listRemoteAnnotations(url, title = "") {
 
 async function listRemoteAnnotationsForTab(url, title, tabId) {
   const annotations = await listRemoteAnnotations(url, title);
-  await updateBadge(tabId, annotations.length);
+  await updatePageBadge(tabId, url, annotations.length);
   return { annotations };
 }
 
@@ -971,7 +1004,7 @@ async function updateBadgeForUrl(tabId, url) {
   }
 
   const annotations = await getCachedAnnotations(url);
-  await updateBadge(tabId, annotations.length);
+  await updatePageBadge(tabId, url, annotations.length);
 }
 
 async function notifyAnnotationSyncUpdated(annotation) {
@@ -1008,6 +1041,7 @@ async function notifyClippingSyncUpdated(clipping) {
       if (tab.id == null || !urlMatches(tab.url, clipping.url)) {
         return;
       }
+      await updateBadgeForUrl(tab.id, clipping.url);
       await chrome.tabs.sendMessage(tab.id, { type: "CLIPPING_SYNC_UPDATED", clipping });
     }));
   } catch {
@@ -1034,14 +1068,31 @@ async function notifySyncTasksUpdated() {
   }
 }
 
+async function updatePageBadge(tabId, url, annotationCount = 0) {
+  if (tabId == null) {
+    return;
+  }
+
+  if (annotationCount > 0) {
+    await updateBadge(tabId, annotationCount);
+    return;
+  }
+
+  await setBadgeText(tabId, await isClippingSynced(url) ? "好" : "");
+}
+
 async function updateBadge(tabId, count) {
   if (tabId == null) {
     return;
   }
 
   const text = count > 0 ? (count > 99 ? "99+" : String(count)) : "";
+  await setBadgeText(tabId, text);
+}
+
+async function setBadgeText(tabId, text) {
   try {
-    await chrome.action.setBadgeText({ tabId, text });
+    await chrome.action.setBadgeText({ tabId, text: String(text || "") });
   } catch {
     // Some internal pages do not allow per-tab badge updates.
   }
@@ -1428,6 +1479,32 @@ async function getCachedAnnotations(url) {
   return sortAnnotations(Array.isArray(data[key]) ? data[key] : []);
 }
 
+async function markClippingSynced(clipping) {
+  if (!clipping?.url) {
+    return;
+  }
+
+  const key = await clippingSyncedKey(clipping.url);
+  await chrome.storage.local.set({
+    [key]: {
+      url: canonicalPageUrl(clipping.url),
+      title: clipping.title || "",
+      path: clipping.path || "",
+      syncedAt: clipping.syncSyncedAt || new Date().toISOString()
+    }
+  });
+}
+
+async function isClippingSynced(url) {
+  if (!url) {
+    return false;
+  }
+
+  const key = await clippingSyncedKey(url);
+  const data = await chrome.storage.local.get(key);
+  return Boolean(data[key]?.syncedAt || data[key] === true);
+}
+
 function sortAnnotations(annotations) {
   return annotations.slice().sort((a, b) => (b.createdAt || "").localeCompare(a.createdAt || ""));
 }
@@ -1595,6 +1672,10 @@ function normalizeSidecarPath(settings, markdownPath, annotationDataPath) {
 
 async function cacheKey(url) {
   return `${CACHE_PREFIX}${await sha256(url)}`;
+}
+
+async function clippingSyncedKey(url) {
+  return `${CLIP_SYNCED_PREFIX}${await sha256(canonicalPageUrl(url))}`;
 }
 
 async function sha256(value) {
@@ -1778,6 +1859,16 @@ function urlCandidates(url) {
   return [...candidates].filter(Boolean);
 }
 
+function canonicalPageUrl(url) {
+  try {
+    const parsed = new URL(url);
+    parsed.hash = "";
+    return parsed.toString();
+  } catch {
+    return String(url || "");
+  }
+}
+
 function yamlString(value) {
   return `'${String(value ?? "").replace(/'/g, "''")}'`;
 }
@@ -1806,6 +1897,27 @@ function yamlArray(values) {
 
 function uniqueTags(tags) {
   return [...new Set(tags.map((tag) => String(tag || "").trim()).filter(Boolean))];
+}
+
+function normalizeTags(tags) {
+  const values = Array.isArray(tags) ? tags : String(tags || "").split(",");
+  const seen = new Set();
+  const normalized = [];
+
+  for (const raw of values) {
+    const tag = String(raw || "")
+      .trim()
+      .replace(/^#+/, "")
+      .replace(/\s+/g, "-");
+    const key = tag.toLowerCase();
+    if (!tag || seen.has(key)) {
+      continue;
+    }
+    seen.add(key);
+    normalized.push(tag);
+  }
+
+  return normalized;
 }
 
 function formatTag(tag) {

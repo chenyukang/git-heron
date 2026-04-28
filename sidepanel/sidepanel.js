@@ -4,7 +4,9 @@ const state = {
   settings: null,
   draft: null,
   annotations: [],
-  color: "yellow"
+  color: "yellow",
+  selectedTags: [],
+  recentTags: []
 };
 
 const elements = {
@@ -31,6 +33,8 @@ const elements = {
   quote: document.querySelector("#quote"),
   note: document.querySelector("#note"),
   tags: document.querySelector("#tags"),
+  selectedTags: document.querySelector("#selected-tags"),
+  recentTags: document.querySelector("#recent-tags"),
   saveAnnotation: document.querySelector("#save-annotation"),
   sync: document.querySelector("#sync"),
   refresh: document.querySelector("#refresh"),
@@ -61,6 +65,7 @@ chrome.runtime.onMessage.addListener((message) => {
 async function init() {
   bindEvents();
   await loadSettings();
+  await loadRecentTags();
   await refreshPageState();
 }
 
@@ -73,7 +78,8 @@ function bindEvents() {
   elements.testSettings.addEventListener("click", testSettings);
   elements.saveAnnotation.addEventListener("click", saveAnnotation);
   elements.note.addEventListener("keydown", handleSubmitShortcut);
-  elements.tags.addEventListener("keydown", handleSubmitShortcut);
+  elements.tags.addEventListener("keydown", handleTagInputKeydown);
+  elements.tags.addEventListener("blur", commitTagInput);
   elements.sync.addEventListener("click", syncRemoteAnnotations);
   elements.refresh.addEventListener("click", refreshPageState);
 
@@ -89,6 +95,17 @@ async function loadSettings() {
   const response = await sendRuntime({ type: "GET_SETTINGS" });
   state.settings = response.settings;
   renderSettings();
+}
+
+async function loadRecentTags() {
+  try {
+    const response = await sendRuntime({ type: "GET_RECENT_TAGS" });
+    state.recentTags = normalizeTagList(response.tags || []);
+    renderTagPicker();
+  } catch {
+    state.recentTags = [];
+    renderTagPicker();
+  }
 }
 
 function renderSettings() {
@@ -223,7 +240,7 @@ async function saveAnnotation() {
   const annotation = {
     ...state.draft,
     note: elements.note.value.trim(),
-    tags: parseTags(elements.tags.value),
+    tags: currentSelectedTags(),
     color: state.color
   };
 
@@ -235,7 +252,8 @@ async function saveAnnotation() {
     });
     state.draft = null;
     elements.note.value = "";
-    elements.tags.value = "";
+    setSelectedTags([]);
+    await loadRecentTags();
     state.annotations = [response.annotation]
       .concat(state.annotations.filter((item) => item.id !== response.annotation.id));
     renderDraft();
@@ -252,6 +270,105 @@ function handleSubmitShortcut(event) {
   if (event.key === "Enter" && (event.ctrlKey || event.metaKey) && !elements.saveAnnotation.disabled) {
     event.preventDefault();
     saveAnnotation();
+  }
+}
+
+function handleTagInputKeydown(event) {
+  if (event.key === "Enter" && (event.ctrlKey || event.metaKey) && !elements.saveAnnotation.disabled) {
+    event.preventDefault();
+    commitTagInput();
+    saveAnnotation();
+    return;
+  }
+  if (event.key === "Enter" || event.key === ",") {
+    event.preventDefault();
+    commitTagInput();
+    return;
+  }
+  if (event.key === "Backspace" && !elements.tags.value && state.selectedTags.length) {
+    event.preventDefault();
+    removeSelectedTag(state.selectedTags[state.selectedTags.length - 1]);
+  }
+}
+
+function commitTagInput() {
+  const tags = parseTags(elements.tags.value);
+  if (!tags.length) {
+    return;
+  }
+  elements.tags.value = "";
+  tags.forEach(addSelectedTag);
+}
+
+function currentSelectedTags() {
+  commitTagInput();
+  return state.selectedTags.slice();
+}
+
+function setSelectedTags(tags) {
+  state.selectedTags = normalizeTagList(tags);
+  elements.tags.value = "";
+  renderTagPicker();
+}
+
+function addSelectedTag(tag) {
+  const normalized = normalizeTagList([tag])[0];
+  if (!normalized) {
+    return;
+  }
+  if (!state.selectedTags.some((item) => item.toLowerCase() === normalized.toLowerCase())) {
+    state.selectedTags.push(normalized);
+  }
+  renderTagPicker();
+  rememberTags([normalized]);
+}
+
+async function rememberTags(tags) {
+  try {
+    const response = await sendRuntime({ type: "REMEMBER_TAGS", tags });
+    state.recentTags = normalizeTagList(response.tags || []);
+    renderTagPicker();
+  } catch {
+    // Recent tag suggestions are a convenience; saving still works without them.
+  }
+}
+
+function removeSelectedTag(tag) {
+  const key = String(tag || "").toLowerCase();
+  state.selectedTags = state.selectedTags.filter((item) => item.toLowerCase() !== key);
+  renderTagPicker();
+}
+
+function renderTagPicker() {
+  elements.selectedTags.textContent = "";
+  for (const tag of state.selectedTags) {
+    const chip = document.createElement("span");
+    chip.className = "tag-chip";
+    const text = document.createElement("span");
+    text.textContent = tag;
+    const remove = document.createElement("button");
+    remove.type = "button";
+    remove.textContent = "x";
+    remove.title = `Remove ${tag}`;
+    remove.setAttribute("aria-label", `Remove ${tag}`);
+    remove.addEventListener("click", () => removeSelectedTag(tag));
+    chip.append(text, remove);
+    elements.selectedTags.append(chip);
+  }
+
+  elements.recentTags.textContent = "";
+  const selected = new Set(state.selectedTags.map((tag) => tag.toLowerCase()));
+  const candidates = state.recentTags.filter((tag) => !selected.has(tag.toLowerCase())).slice(0, 12);
+  elements.recentTags.hidden = !candidates.length;
+  for (const tag of candidates) {
+    const button = document.createElement("button");
+    button.type = "button";
+    button.textContent = tag;
+    button.addEventListener("click", () => {
+      addSelectedTag(tag);
+      elements.tags.focus();
+    });
+    elements.recentTags.append(button);
   }
 }
 
@@ -554,10 +671,32 @@ function renderClippingStatus(clipping) {
 }
 
 function parseTags(value) {
-  return value
+  if (Array.isArray(value)) {
+    return normalizeTagList(value);
+  }
+  return String(value || "")
     .split(",")
-    .map((tag) => tag.trim())
-    .filter(Boolean);
+    .flatMap((item) => item.split(/\s+/))
+    .filter(Boolean)
+    .map((tag) => tag.trim());
+}
+
+function normalizeTagList(tags) {
+  const seen = new Set();
+  const normalized = [];
+  for (const raw of tags) {
+    const tag = String(raw || "")
+      .trim()
+      .replace(/^#+/, "")
+      .replace(/\s+/g, "-");
+    const key = tag.toLowerCase();
+    if (!tag || seen.has(key)) {
+      continue;
+    }
+    seen.add(key);
+    normalized.push(tag);
+  }
+  return normalized;
 }
 
 function formatDate(value) {

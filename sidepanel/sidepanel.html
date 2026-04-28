@@ -98,7 +98,11 @@
 
         <label>
           Tags
-          <input id="tags" type="text" spellcheck="false" placeholder="reading, idea">
+          <div class="tag-picker">
+            <div id="selected-tags" class="selected-tags"></div>
+            <input id="tags" type="text" spellcheck="false" autocomplete="off" placeholder="Add tag">
+            <div id="recent-tags" class="recent-tags" hidden></div>
+          </div>
         </label>
 
         <div class="color-row" role="radiogroup" aria-label="Highlight color">

@@ -152,6 +152,70 @@
   box-shadow: 0 0 0 3px rgba(37, 99, 235, 0.12);
 }
 
+.gh-annotator-editor__tag-picker {
+  display: grid;
+  gap: 6px;
+}
+
+.gh-annotator-editor__selected-tags,
+.gh-annotator-editor__recent-tags {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 5px;
+}
+
+.gh-annotator-editor__tag-chip,
+.gh-annotator-editor__recent-tags button {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  max-width: 100%;
+  min-height: 24px;
+  padding: 3px 7px;
+  border: 1px solid #d9dee8;
+  border-radius: 999px;
+  background: #f8fafc;
+  color: #475569;
+  font: inherit;
+  font-size: 11px;
+  font-weight: 650;
+}
+
+.gh-annotator-editor__tag-chip span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.gh-annotator-editor__tag-chip button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 16px;
+  height: 16px;
+  margin: 0 !important;
+  padding: 0 !important;
+  border: 0;
+  border-radius: 999px;
+  background: transparent;
+  color: #64748b;
+  cursor: pointer;
+  font: inherit;
+  font-size: 11px;
+  font-weight: 750;
+  line-height: 1;
+}
+
+.gh-annotator-editor__recent-tags button {
+  cursor: pointer;
+}
+
+.gh-annotator-editor__recent-tags button:hover,
+.gh-annotator-editor__tag-chip button:hover {
+  background: #e2e8f0;
+  color: #111827;
+}
+
 .gh-annotator-editor__colors,
 .gh-annotator-editor__actions {
   display: flex;
@@ -824,6 +888,23 @@
   .gh-annotator-editor input::placeholder,
   .gh-annotator-panel__label input::placeholder {
     color: #64748b;
+  }
+
+  .gh-annotator-editor__tag-chip,
+  .gh-annotator-editor__recent-tags button {
+    border-color: #334155;
+    background: #1e293b;
+    color: #cbd5e1;
+  }
+
+  .gh-annotator-editor__tag-chip button {
+    color: #94a3b8;
+  }
+
+  .gh-annotator-editor__recent-tags button:hover,
+  .gh-annotator-editor__tag-chip button:hover {
+    background: #334155;
+    color: #f8fafc;
   }
 
   .gh-annotator-editor__quote,
