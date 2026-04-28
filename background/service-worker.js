@@ -2,11 +2,15 @@ const SETTINGS_KEY = "settings";
 const DRAFT_PREFIX = "draft:";
 const CACHE_PREFIX = "cache:";
 const SYNC_QUEUE_KEY = "syncQueue";
+const CLIP_SYNC_QUEUE_KEY = "clipSyncQueue";
+const SYNC_TASK_HISTORY_KEY = "syncTaskHistory";
 const SYNC_ALARM_NAME = "github-annotator-sync";
 const DEFAULT_BRANCH = "main";
 const DEFAULT_BASE_PATH = "annotations";
+const DEFAULT_CLIP_PATH = "Clippings";
 const DEFAULT_SHOW_SELECTION_TOOLBAR = true;
 const DEFAULT_ACTIVATION_SHORTCUT = "Ctrl+E";
+const DEFAULT_CLIP_SHORTCUT = "Ctrl+O";
 const DEFAULT_BACKGROUND_SYNC = false;
 const GITHUB_API = "https://api.github.com";
 const GITHUB_API_VERSION = "2022-11-28";
@@ -21,7 +25,7 @@ chrome.runtime.onInstalled.addListener(setupExtension);
 chrome.runtime.onStartup?.addListener(setupExtension);
 chrome.alarms?.onAlarm.addListener((alarm) => {
   if (alarm.name === SYNC_ALARM_NAME) {
-    syncQueuedAnnotations().catch((error) => debugWarn("syncQueuedAnnotations:alarmFailed", { message: formatError(error) }));
+    syncQueuedWork().catch((error) => debugWarn("syncQueuedWork:alarmFailed", { message: formatError(error) }));
   }
 });
 chrome.tabs.onUpdated.addListener((tabId, changeInfo) => {
@@ -111,8 +115,25 @@ async function handleMessage(message, sender) {
     case "SAVE_ANNOTATION":
       return { annotation: await saveAnnotation(message.annotation, message.tabId ?? sender?.tab?.id) };
 
+    case "SAVE_CLIPPING":
+      return { clipping: await saveClipping(message.clipping) };
+
     case "RETRY_ANNOTATION_SYNC":
       return { annotation: await retryAnnotationSync(message.id, message.url) };
+
+    case "RETRY_CLIPPING_SYNC":
+      return { clipping: await retryClippingSync(message.id) };
+
+    case "LIST_SYNC_TASKS":
+      return { tasks: await listSyncTasks() };
+
+    case "RETRY_SYNC_TASK":
+      await retrySyncTask(message.taskType, message.id, message.url);
+      return { tasks: await listSyncTasks() };
+
+    case "CANCEL_SYNC_TASK":
+      await cancelSyncTask(message.taskType, message.id);
+      return { tasks: await listSyncTasks() };
 
     default:
       throw new Error(`Unknown message type: ${message?.type || "empty"}`);
@@ -158,8 +179,10 @@ function buildSettings(rawSettings = {}, existing = {}) {
     name: repo.name,
     branch: (rawSettings.branch || existing.branch || DEFAULT_BRANCH).trim() || DEFAULT_BRANCH,
     basePath: normalizePath(rawSettings.basePath || existing.basePath || DEFAULT_BASE_PATH),
+    clipPath: normalizePath(rawSettings.clipPath || existing.clipPath || DEFAULT_CLIP_PATH),
     showSelectionToolbar: rawSettings.showSelectionToolbar ?? existing.showSelectionToolbar ?? DEFAULT_SHOW_SELECTION_TOOLBAR,
     activationShortcut: normalizeShortcut(rawSettings.activationShortcut || existing.activationShortcut || DEFAULT_ACTIVATION_SHORTCUT),
+    clipShortcut: normalizeShortcut(rawSettings.clipShortcut || existing.clipShortcut || DEFAULT_CLIP_SHORTCUT),
     backgroundSync: rawSettings.backgroundSync ?? existing.backgroundSync ?? DEFAULT_BACKGROUND_SYNC
   };
 
@@ -181,8 +204,10 @@ function sanitizeSettings(settings = {}) {
     name: settings.name || "",
     branch: settings.branch || DEFAULT_BRANCH,
     basePath: settings.basePath || DEFAULT_BASE_PATH,
+    clipPath: settings.clipPath || DEFAULT_CLIP_PATH,
     showSelectionToolbar: settings.showSelectionToolbar ?? DEFAULT_SHOW_SELECTION_TOOLBAR,
     activationShortcut: settings.activationShortcut || DEFAULT_ACTIVATION_SHORTCUT,
+    clipShortcut: settings.clipShortcut || DEFAULT_CLIP_SHORTCUT,
     backgroundSync: settings.backgroundSync ?? DEFAULT_BACKGROUND_SYNC,
     hasToken
   };
@@ -297,6 +322,60 @@ async function saveAnnotation(input, tabId) {
   }
 
   return savedAnnotation;
+}
+
+async function saveClipping(input = {}) {
+  const settings = await getReadySettings();
+  const title = collapseWhitespace(input.title || getUrlHost(input.url) || "Untitled page") || "Untitled page";
+  const markdown = String(input.markdown || "").trim();
+  if (!input.url || !markdown) {
+    throw new Error("Could not extract clipping content from this page.");
+  }
+
+  const path = `${settings.clipPath || DEFAULT_CLIP_PATH}/${safeMarkdownFileName(title)}.md`;
+  const content = renderClippingMarkdown({
+    ...input,
+    title,
+    markdown
+  });
+  const clipping = {
+    id: input.id || createAnnotationId(),
+    url: input.url,
+    title,
+    path,
+    content,
+    wordCount: input.wordCount || 0,
+    createdAt: input.createdAt || new Date().toISOString(),
+    updatedAt: new Date().toISOString()
+  };
+
+  debugLog("saveClipping:start", {
+    url: input.url,
+    title,
+    path,
+    markdownLength: markdown.length,
+    backgroundSync: Boolean(settings.backgroundSync)
+  });
+
+  if (settings.backgroundSync) {
+    const queued = markClippingSyncState(clipping, "pending");
+    await queueClippingSync(queued);
+    return publicClipping(queued);
+  }
+
+  await withGitHubWriteLock(() => writeClippingToGitHub(settings, clipping));
+  return publicClipping(markClippingSyncState(clipping, "synced"));
+}
+
+async function writeClippingToGitHub(settings, clipping) {
+  return commitTreeUpdateWithRetry(settings, "Add clipping for link", [
+    {
+      path: clipping.path,
+      mode: "100644",
+      type: "blob",
+      content: clipping.content
+    }
+  ]);
 }
 
 function buildAnnotation(input) {
@@ -420,9 +499,10 @@ async function queueAnnotationSync(annotation) {
     updatedAt: now
   };
   await saveSyncQueue(queue);
+  await rememberSyncTask(syncTaskFromAnnotationJob(queue[annotation.id]));
   debugLog("queueAnnotationSync", { id: annotation.id, url: annotation.url });
   await scheduleSyncQueue();
-  syncQueuedAnnotations().catch((error) => debugWarn("queueAnnotationSync:backgroundFailed", { message: formatError(error) }));
+  syncQueuedWork().catch((error) => debugWarn("queueAnnotationSync:backgroundFailed", { message: formatError(error) }));
 }
 
 async function retryAnnotationSync(id, url) {
@@ -451,16 +531,21 @@ async function retryAnnotationSync(id, url) {
 
 async function syncQueuedAnnotations() {
   if (syncQueueRunning) {
-    debugLog("syncQueuedAnnotations:alreadyRunning");
+    debugLog("syncQueuedWork:alreadyRunning");
     return;
   }
 
   syncQueueRunning = true;
   try {
     await syncQueuedAnnotationsOnce();
+    await syncQueuedClippingsOnce();
   } finally {
     syncQueueRunning = false;
   }
+}
+
+async function syncQueuedWork() {
+  return syncQueuedAnnotations();
 }
 
 async function syncQueuedAnnotationsOnce() {
@@ -496,6 +581,7 @@ async function syncQueueJob(id) {
   };
   await saveSyncQueue(queue);
   await cacheAnnotation(syncing);
+  await rememberSyncTask(syncTaskFromAnnotationJob(queue[id]));
   await notifyAnnotationSyncUpdated(syncing);
 
   try {
@@ -505,6 +591,12 @@ async function syncQueueJob(id) {
     delete latestQueue[id];
     await saveSyncQueue(latestQueue);
     await cacheAnnotation(synced);
+    await rememberSyncTask(syncTaskFromAnnotation("annotation", synced, {
+      status: "synced",
+      attempts,
+      queuedAt: job.queuedAt,
+      updatedAt: new Date().toISOString()
+    }));
     await notifyAnnotationSyncUpdated(synced);
     debugLog("syncQueueJob:synced", { id, url: synced.url, attempts });
   } catch (error) {
@@ -523,8 +615,120 @@ async function syncQueueJob(id) {
     };
     await saveSyncQueue(latestQueue);
     await cacheAnnotation(failed);
+    await rememberSyncTask(syncTaskFromAnnotationJob(latestQueue[id]));
     await notifyAnnotationSyncUpdated(failed);
     debugWarn("syncQueueJob:failed", { id, url: failed.url, attempts, error: formatError(error) });
+  }
+}
+
+async function queueClippingSync(clipping) {
+  const queue = await getClipSyncQueue();
+  const existing = queue[clipping.id] || {};
+  const now = new Date().toISOString();
+  queue[clipping.id] = {
+    id: clipping.id,
+    clipping: markClippingSyncState(clipping, "pending", {
+      attempts: existing.attempts || clipping.syncAttempts || 0
+    }),
+    status: "pending",
+    attempts: existing.attempts || clipping.syncAttempts || 0,
+    error: "",
+    queuedAt: existing.queuedAt || now,
+    updatedAt: now
+  };
+  await saveClipSyncQueue(queue);
+  await rememberSyncTask(syncTaskFromClippingJob(queue[clipping.id]));
+  await notifyClippingSyncUpdated(publicClipping(queue[clipping.id].clipping));
+  debugLog("queueClippingSync", { id: clipping.id, path: clipping.path });
+  await scheduleSyncQueue();
+  syncQueuedWork().catch((error) => debugWarn("queueClippingSync:backgroundFailed", { message: formatError(error) }));
+}
+
+async function retryClippingSync(id) {
+  if (!id) {
+    throw new Error("Missing clipping id.");
+  }
+
+  const queue = await getClipSyncQueue();
+  const job = queue[id];
+  if (!job?.clipping) {
+    throw new Error("Could not find clipping to retry.");
+  }
+
+  const queued = markClippingSyncState(job.clipping, "pending", {
+    attempts: job.attempts || job.clipping.syncAttempts || 0
+  });
+  await queueClippingSync(queued);
+  return publicClipping(queued);
+}
+
+async function syncQueuedClippingsOnce() {
+  const queue = await getClipSyncQueue();
+  const jobs = Object.values(queue).filter((job) => job?.id && (job.status === "pending" || job.status === "syncing"));
+  if (!jobs.length) {
+    return;
+  }
+
+  debugLog("syncQueuedClippings:start", { count: jobs.length });
+  for (const job of jobs) {
+    await syncClipQueueJob(job.id);
+  }
+}
+
+async function syncClipQueueJob(id) {
+  const settings = await getReadySettings();
+  const queue = await getClipSyncQueue();
+  const job = queue[id];
+  if (!job?.clipping) {
+    return;
+  }
+
+  const attempts = (job.attempts || 0) + 1;
+  const syncing = markClippingSyncState(job.clipping, "syncing", { attempts });
+  queue[id] = {
+    ...job,
+    clipping: syncing,
+    status: "syncing",
+    attempts,
+    error: "",
+    updatedAt: new Date().toISOString()
+  };
+  await saveClipSyncQueue(queue);
+  await rememberSyncTask(syncTaskFromClippingJob(queue[id]));
+  await notifyClippingSyncUpdated(publicClipping(syncing));
+
+  try {
+    await withGitHubWriteLock(() => writeClippingToGitHub(settings, syncing));
+    const synced = markClippingSyncState(syncing, "synced", { attempts });
+    const latestQueue = await getClipSyncQueue();
+    delete latestQueue[id];
+    await saveClipSyncQueue(latestQueue);
+    await rememberSyncTask(syncTaskFromClipping("clipping", synced, {
+      status: "synced",
+      attempts,
+      queuedAt: job.queuedAt,
+      updatedAt: new Date().toISOString()
+    }));
+    await notifyClippingSyncUpdated(publicClipping(synced));
+    debugLog("syncClipQueueJob:synced", { id, path: synced.path, attempts });
+  } catch (error) {
+    const failed = markClippingSyncState(syncing, "failed", {
+      attempts,
+      error: formatError(error)
+    });
+    const latestQueue = await getClipSyncQueue();
+    latestQueue[id] = {
+      ...job,
+      clipping: failed,
+      status: "failed",
+      attempts,
+      error: formatError(error),
+      updatedAt: new Date().toISOString()
+    };
+    await saveClipSyncQueue(latestQueue);
+    await rememberSyncTask(syncTaskFromClippingJob(latestQueue[id]));
+    await notifyClippingSyncUpdated(publicClipping(failed));
+    debugWarn("syncClipQueueJob:failed", { id, path: failed.path, attempts, error: formatError(error) });
   }
 }
 
@@ -537,9 +741,136 @@ async function saveSyncQueue(queue) {
   await chrome.storage.local.set({ [SYNC_QUEUE_KEY]: queue });
 }
 
+async function getClipSyncQueue() {
+  const data = await chrome.storage.local.get(CLIP_SYNC_QUEUE_KEY);
+  return data[CLIP_SYNC_QUEUE_KEY] && typeof data[CLIP_SYNC_QUEUE_KEY] === "object" ? data[CLIP_SYNC_QUEUE_KEY] : {};
+}
+
+async function saveClipSyncQueue(queue) {
+  await chrome.storage.local.set({ [CLIP_SYNC_QUEUE_KEY]: queue });
+}
+
+async function getSyncTaskHistory() {
+  const data = await chrome.storage.local.get(SYNC_TASK_HISTORY_KEY);
+  return Array.isArray(data[SYNC_TASK_HISTORY_KEY]) ? data[SYNC_TASK_HISTORY_KEY] : [];
+}
+
+async function saveSyncTaskHistory(tasks) {
+  await chrome.storage.local.set({ [SYNC_TASK_HISTORY_KEY]: tasks.slice(0, 5) });
+}
+
+async function rememberSyncTask(task) {
+  if (!task?.id || !task?.type) {
+    return;
+  }
+
+  const normalized = normalizeSyncTask(task);
+  const history = await getSyncTaskHistory();
+  const next = [
+    normalized,
+    ...history.filter((item) => syncTaskKey(item) !== syncTaskKey(normalized))
+  ].slice(0, 5);
+  await saveSyncTaskHistory(next);
+  notifySyncTasksUpdated().catch((error) => debugWarn("rememberSyncTask:notifyFailed", { message: formatError(error) }));
+}
+
+async function listSyncTasks() {
+  const [annotationQueue, clipQueue, history] = await Promise.all([
+    getSyncQueue(),
+    getClipSyncQueue(),
+    getSyncTaskHistory()
+  ]);
+  const byKey = new Map(history.map((task) => [syncTaskKey(task), normalizeSyncTask(task)]));
+
+  for (const job of Object.values(annotationQueue)) {
+    const task = syncTaskFromAnnotationJob(job);
+    if (task) {
+      byKey.set(syncTaskKey(task), task);
+    }
+  }
+
+  for (const job of Object.values(clipQueue)) {
+    const task = syncTaskFromClippingJob(job);
+    if (task) {
+      byKey.set(syncTaskKey(task), task);
+    }
+  }
+
+  return [...byKey.values()]
+    .filter((task) => task.id && task.type)
+    .sort((left, right) => (right.updatedAt || "").localeCompare(left.updatedAt || ""))
+    .slice(0, 5);
+}
+
+async function retrySyncTask(type, id, url) {
+  if (type === "annotation") {
+    await retryAnnotationSync(id, url);
+    return;
+  }
+  if (type === "clipping") {
+    await retryClippingSync(id);
+    return;
+  }
+  throw new Error("Unknown sync task type.");
+}
+
+async function cancelSyncTask(type, id) {
+  if (!id) {
+    throw new Error("Missing sync task id.");
+  }
+
+  if (type === "annotation") {
+    const queue = await getSyncQueue();
+    const job = queue[id];
+    if (!job?.annotation) {
+      throw new Error("Could not find annotation sync task.");
+    }
+
+    delete queue[id];
+    await saveSyncQueue(queue);
+    const canceled = markAnnotationSyncState(job.annotation, "canceled", { attempts: job.attempts || 0 });
+    await cacheAnnotation(canceled);
+    await rememberSyncTask(syncTaskFromAnnotation("annotation", canceled, {
+      status: "canceled",
+      attempts: job.attempts || 0,
+      queuedAt: job.queuedAt,
+      updatedAt: new Date().toISOString()
+    }));
+    await notifyAnnotationSyncUpdated(canceled);
+    debugLog("cancelSyncTask:annotation", { id });
+    return;
+  }
+
+  if (type === "clipping") {
+    const queue = await getClipSyncQueue();
+    const job = queue[id];
+    if (!job?.clipping) {
+      throw new Error("Could not find clipping sync task.");
+    }
+
+    delete queue[id];
+    await saveClipSyncQueue(queue);
+    const canceled = markClippingSyncState(job.clipping, "canceled", { attempts: job.attempts || 0 });
+    await rememberSyncTask(syncTaskFromClipping("clipping", canceled, {
+      status: "canceled",
+      attempts: job.attempts || 0,
+      queuedAt: job.queuedAt,
+      updatedAt: new Date().toISOString()
+    }));
+    await notifyClippingSyncUpdated(publicClipping(canceled));
+    debugLog("cancelSyncTask:clipping", { id });
+    return;
+  }
+
+  throw new Error("Unknown sync task type.");
+}
+
 async function scheduleSyncQueue() {
-  const queue = await getSyncQueue();
-  const hasWork = Object.values(queue).some((job) => job?.status === "pending" || job?.status === "syncing");
+  const annotationQueue = await getSyncQueue();
+  const clipQueue = await getClipSyncQueue();
+  const hasAnnotationWork = Object.values(annotationQueue).some((job) => job?.status === "pending" || job?.status === "syncing");
+  const hasClipWork = Object.values(clipQueue).some((job) => job?.status === "pending" || job?.status === "syncing");
+  const hasWork = hasAnnotationWork || hasClipWork;
   if (!hasWork) {
     return;
   }
@@ -661,6 +992,45 @@ async function notifyAnnotationSyncUpdated(annotation) {
     }));
   } catch {
     // Content scripts will pick the status up from cache on the next refresh.
+  }
+}
+
+async function notifyClippingSyncUpdated(clipping) {
+  try {
+    await chrome.runtime.sendMessage({ type: "CLIPPING_SYNC_UPDATED", clipping });
+  } catch {
+    // The native side panel may not be open.
+  }
+
+  try {
+    const tabs = await chrome.tabs.query({ url: ["http://*/*", "https://*/*"] });
+    await Promise.allSettled(tabs.map(async (tab) => {
+      if (tab.id == null || !urlMatches(tab.url, clipping.url)) {
+        return;
+      }
+      await chrome.tabs.sendMessage(tab.id, { type: "CLIPPING_SYNC_UPDATED", clipping });
+    }));
+  } catch {
+    // Content scripts will pick the status up on the next clipping action.
+  }
+}
+
+async function notifySyncTasksUpdated() {
+  const tasks = await listSyncTasks();
+
+  try {
+    await chrome.runtime.sendMessage({ type: "SYNC_TASKS_UPDATED", tasks });
+  } catch {
+    // The native side panel may not be open.
+  }
+
+  try {
+    const tabs = await chrome.tabs.query({ url: ["http://*/*", "https://*/*"] });
+    await Promise.allSettled(tabs.map((tab) => (
+      tab.id == null ? null : chrome.tabs.sendMessage(tab.id, { type: "SYNC_TASKS_UPDATED", tasks })
+    )));
+  } catch {
+    // Content scripts can refresh tasks the next time Settings opens.
   }
 }
 
@@ -847,6 +1217,28 @@ async function commitTreeUpdate(settings, message, tree) {
   return commit;
 }
 
+async function commitTreeUpdateWithRetry(settings, message, tree) {
+  const maxAttempts = 3;
+  for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+    try {
+      return await commitTreeUpdate(settings, message, tree);
+    } catch (error) {
+      if (!isNonFastForwardError(error) || attempt >= maxAttempts) {
+        throw error;
+      }
+
+      debugWarn("commitTreeUpdateWithRetry:retryNonFastForward", {
+        attempt,
+        maxAttempts,
+        message: formatError(error)
+      });
+      await delay(250 * attempt);
+    }
+  }
+
+  throw new Error("Could not update GitHub after branch ref changed.");
+}
+
 async function getWritableBranchRef(settings) {
   const getRefPath = branchGetRefPath(settings, settings.branch);
 
@@ -962,6 +1354,33 @@ function renderHighlightMarkdown(annotation) {
   return `- ${escapeMarkdownInline(quote)} - [Updated on ${updatedAt}](${annotation.url}) - Group: ${group}${note}${tags}`;
 }
 
+function renderClippingMarkdown(clipping) {
+  const url = clipping.url;
+  const title = clipping.title || url;
+  const site = clipping.site || clipping.domain || getUrlHost(url);
+  const author = clipping.author || site;
+  const clippedAt = new Date().toISOString();
+  const frontmatter = [
+    "---",
+    "doc_type: web-clipping",
+    `url: ${yamlString(url)}`,
+    `title: ${yamlString(title)}`,
+    `author: ${yamlString(author)}`,
+    `site: ${yamlString(site)}`,
+    clipping.published ? `published: ${yamlString(clipping.published)}` : "",
+    `clipped_at: ${yamlString(clippedAt)}`,
+    `source: ${yamlString("github-web-annotator")}`,
+    "---",
+    ""
+  ].filter((line) => line !== "").join("\n");
+
+  return `${frontmatter}
+# ${title}
+
+${clipping.markdown.trim()}
+`;
+}
+
 function markdownFrontmatterUrl(markdown) {
   return markdownFrontmatterValue(markdown, "url");
 }
@@ -1039,6 +1458,106 @@ function stripSyncMetadata(annotation) {
     ...clean
   } = annotation || {};
   return clean;
+}
+
+function markClippingSyncState(clipping, status, details = {}) {
+  const now = new Date().toISOString();
+  return {
+    ...clipping,
+    syncStatus: status,
+    syncError: details.error || "",
+    syncAttempts: details.attempts ?? clipping.syncAttempts ?? 0,
+    syncUpdatedAt: now,
+    syncSyncedAt: status === "synced" ? now : clipping.syncSyncedAt || ""
+  };
+}
+
+function publicClipping(clipping) {
+  if (!clipping) {
+    return null;
+  }
+  const {
+    content,
+    ...publicData
+  } = clipping;
+  return publicData;
+}
+
+function syncTaskFromAnnotationJob(job) {
+  if (!job?.id || !job.annotation) {
+    return null;
+  }
+
+  return syncTaskFromAnnotation("annotation", job.annotation, {
+    status: job.status || job.annotation.syncStatus || "pending",
+    attempts: job.attempts || job.annotation.syncAttempts || 0,
+    error: job.error || job.annotation.syncError || "",
+    queuedAt: job.queuedAt || "",
+    updatedAt: job.updatedAt || job.annotation.syncUpdatedAt || ""
+  });
+}
+
+function syncTaskFromAnnotation(type, annotation, details = {}) {
+  return normalizeSyncTask({
+    id: annotation?.id,
+    type,
+    status: details.status || annotation?.syncStatus || "synced",
+    label: annotation?.note || annotation?.quote || annotation?.selector?.exact || annotation?.title || annotation?.url || "Annotation",
+    url: annotation?.url || "",
+    attempts: details.attempts ?? annotation?.syncAttempts ?? 0,
+    error: details.error || annotation?.syncError || "",
+    queuedAt: details.queuedAt || "",
+    updatedAt: details.updatedAt || annotation?.syncUpdatedAt || annotation?.updatedAt || annotation?.createdAt || ""
+  });
+}
+
+function syncTaskFromClippingJob(job) {
+  if (!job?.id || !job.clipping) {
+    return null;
+  }
+
+  return syncTaskFromClipping("clipping", job.clipping, {
+    status: job.status || job.clipping.syncStatus || "pending",
+    attempts: job.attempts || job.clipping.syncAttempts || 0,
+    error: job.error || job.clipping.syncError || "",
+    queuedAt: job.queuedAt || "",
+    updatedAt: job.updatedAt || job.clipping.syncUpdatedAt || ""
+  });
+}
+
+function syncTaskFromClipping(type, clipping, details = {}) {
+  return normalizeSyncTask({
+    id: clipping?.id,
+    type,
+    status: details.status || clipping?.syncStatus || "synced",
+    label: clipping?.title || clipping?.path || clipping?.url || "Clipping",
+    url: clipping?.url || "",
+    path: clipping?.path || "",
+    attempts: details.attempts ?? clipping?.syncAttempts ?? 0,
+    error: details.error || clipping?.syncError || "",
+    queuedAt: details.queuedAt || "",
+    updatedAt: details.updatedAt || clipping?.syncUpdatedAt || clipping?.updatedAt || clipping?.createdAt || ""
+  });
+}
+
+function normalizeSyncTask(task) {
+  const updatedAt = task.updatedAt || new Date().toISOString();
+  return {
+    id: String(task.id || ""),
+    type: task.type === "clipping" ? "clipping" : "annotation",
+    status: task.status || "pending",
+    label: collapseWhitespace(task.label || (task.type === "clipping" ? "Clipping" : "Annotation")).slice(0, 160),
+    url: String(task.url || ""),
+    path: String(task.path || ""),
+    attempts: task.attempts || 0,
+    error: String(task.error || ""),
+    queuedAt: task.queuedAt || "",
+    updatedAt
+  };
+}
+
+function syncTaskKey(task) {
+  return `${task?.type || "annotation"}:${task?.id || ""}`;
 }
 
 async function markdownFilePath(settings, page, options = {}) {
@@ -1205,6 +1724,16 @@ function safeFileTitle(value) {
     .replace(/^-+|-+$/g, "") || "untitled";
 }
 
+function safeMarkdownFileName(value) {
+  return String(value || "Untitled page")
+    .trim()
+    .replace(/[\\/:*?"<>|\n\r\t]+/g, "-")
+    .replace(/\s+/g, " ")
+    .replace(/^\.+|\.+$/g, "")
+    .slice(0, 160)
+    .trim() || "Untitled page";
+}
+
 function localDateString(date = new Date()) {
   const pad = (number) => String(number).padStart(2, "0");
   return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}`;
@@ -1348,6 +1877,9 @@ function fromBase64(value) {
 function formatError(error) {
   if (!error) {
     return "Unknown error.";
+  }
+  if (error.status === 401 && /bad credentials/i.test(error.message || error.payload?.message || "")) {
+    return "GitHub token is invalid or expired. Open Settings, paste a fresh token, click Test, then Save.";
   }
   return error.message || String(error);
 }

@@ -9,6 +9,7 @@
   const DEFAULT_USER_SETTINGS = {
     showSelectionToolbar: true,
     activationShortcut: "Ctrl+E",
+    clipShortcut: "Ctrl+O",
     backgroundSync: false
   };
 
@@ -23,6 +24,8 @@
   let retryTimer = null;
   let userSettings = { ...DEFAULT_USER_SETTINGS };
   let userSettingsLoaded = false;
+  let currentClipping = null;
+  let clippingPanelCloseTimer = null;
   const annotationsById = new Map();
 
   document.addEventListener("mouseup", handleMouseUp, true);
@@ -51,6 +54,20 @@
 
     if (message?.type === "ANNOTATION_SYNC_UPDATED") {
       updateLocalAnnotation(message.annotation);
+      sendResponse({ updated: true });
+      return false;
+    }
+
+    if (message?.type === "CLIPPING_SYNC_UPDATED") {
+      updateClippingStatus(message.clipping);
+      sendResponse({ updated: true });
+      return false;
+    }
+
+    if (message?.type === "SYNC_TASKS_UPDATED") {
+      if (pagePanel && !pagePanel.settings.hidden) {
+        renderPagePanelTasks(message.tasks || []);
+      }
       sendResponse({ updated: true });
       return false;
     }
@@ -96,11 +113,18 @@
       return;
     }
 
-    if (!shortcutMatches(event, userSettings.activationShortcut)) {
+    if (isEditableTarget(event.target)) {
       return;
     }
 
-    if (isEditableTarget(event.target)) {
+    if (shortcutMatches(event, userSettings.clipShortcut)) {
+      event.preventDefault();
+      event.stopPropagation();
+      saveCurrentPageClipping();
+      return;
+    }
+
+    if (!shortcutMatches(event, userSettings.activationShortcut)) {
       return;
     }
 
@@ -445,9 +469,7 @@
     const sync = panelIconButton("Sync", "↻");
     const close = panelIconButton("Close", "x");
 
-    settingsToggle.addEventListener("click", () => {
-      pagePanel.settings.hidden = !pagePanel.settings.hidden;
-    });
+    settingsToggle.addEventListener("click", togglePagePanelSettings);
     sync.addEventListener("click", () => syncPagePanelAnnotations(true));
     close.addEventListener("click", () => {
       root.hidden = true;
@@ -459,6 +481,13 @@
     const status = document.createElement("div");
     status.className = "gh-annotator-panel__status";
 
+    const clippingActions = document.createElement("div");
+    clippingActions.className = "gh-annotator-panel__clip-actions";
+    clippingActions.hidden = true;
+    const retryClipping = panelButton("Retry clipping");
+    retryClipping.addEventListener("click", retryCurrentClippingSync);
+    clippingActions.append(retryClipping);
+
     const settings = createPagePanelSettings();
 
     const notesHeader = document.createElement("div");
@@ -468,21 +497,27 @@
     const list = document.createElement("div");
     list.className = "gh-annotator-panel__list";
 
-    root.append(header, status, settings.root, notesHeader, list);
+    root.append(header, status, clippingActions, settings.root, notesHeader, list);
     appendUiNode(root);
 
     return {
       root,
       status,
+      clippingActions,
+      retryClipping,
       settings: settings.root,
       settingsState: settings.state,
       token: settings.token,
       repo: settings.repo,
       branch: settings.branch,
       basePath: settings.basePath,
+      clipPath: settings.clipPath,
       showSelectionToolbar: settings.showSelectionToolbar,
       backgroundSync: settings.backgroundSync,
       activationShortcut: settings.activationShortcut,
+      clipShortcut: settings.clipShortcut,
+      tasks: settings.tasks,
+      tasksList: settings.tasksList,
       list
     };
   }
@@ -507,9 +542,11 @@
     const repo = panelInput("Repository", "text", "owner/repo");
     const branch = panelInput("Branch", "text", "main");
     const basePath = panelInput("Path", "text", "annotations");
+    const clipPath = panelInput("Clip path", "text", "Clippings");
     const showSelectionToolbar = panelCheckbox("Show floating button");
     const backgroundSync = panelCheckbox("Background sync");
     const activationShortcut = panelInput("Shortcut", "text", "Ctrl+E");
+    const clipShortcut = panelInput("Clip shortcut", "text", "Ctrl+O");
 
     const actions = document.createElement("div");
     actions.className = "gh-annotator-panel__actions";
@@ -519,7 +556,17 @@
     test.addEventListener("click", testPagePanelSettings);
     actions.append(save, test);
 
-    root.append(headingRow, token.label, repo.label, branch.label, basePath.label, showSelectionToolbar.label, backgroundSync.label, activationShortcut.label, actions);
+    const tasks = document.createElement("section");
+    tasks.className = "gh-annotator-panel__tasks";
+    tasks.hidden = true;
+    const tasksHeading = document.createElement("div");
+    tasksHeading.className = "gh-annotator-panel__tasks-heading";
+    tasksHeading.textContent = "Tasks";
+    const tasksList = document.createElement("div");
+    tasksList.className = "gh-annotator-panel__tasks-list";
+    tasks.append(tasksHeading, tasksList);
+
+    root.append(headingRow, token.label, repo.label, branch.label, basePath.label, clipPath.label, showSelectionToolbar.label, backgroundSync.label, activationShortcut.label, clipShortcut.label, actions, tasks);
 
     return {
       root,
@@ -528,25 +575,40 @@
       repo: repo.input,
       branch: branch.input,
       basePath: basePath.input,
+      clipPath: clipPath.input,
       showSelectionToolbar: showSelectionToolbar.input,
       backgroundSync: backgroundSync.input,
-      activationShortcut: activationShortcut.input
+      activationShortcut: activationShortcut.input,
+      clipShortcut: clipShortcut.input,
+      tasks,
+      tasksList
     };
+  }
+
+  async function togglePagePanelSettings() {
+    const willShow = pagePanel.settings.hidden;
+    pagePanel.settings.hidden = !willShow;
+    if (willShow) {
+      await refreshPagePanelTasks();
+    }
   }
 
   function renderPagePanelSettings(settings) {
     pagePanel.repo.value = settings.repo || "";
     pagePanel.branch.value = settings.branch || "main";
     pagePanel.basePath.value = settings.basePath || "annotations";
+    pagePanel.clipPath.value = settings.clipPath || "Clippings";
     pagePanel.showSelectionToolbar.checked = settings.showSelectionToolbar ?? true;
     pagePanel.backgroundSync.checked = settings.backgroundSync ?? false;
     pagePanel.activationShortcut.value = settings.activationShortcut || "Ctrl+E";
+    pagePanel.clipShortcut.value = settings.clipShortcut || "Ctrl+O";
     pagePanel.token.placeholder = settings.hasToken ? "Saved token" : "github_pat_...";
     pagePanel.settingsState.textContent = settings.hasToken && settings.repo ? "Saved" : "Not connected";
     pagePanel.settingsState.dataset.connected = String(Boolean(settings.hasToken && settings.repo));
     updateUserSettings(settings);
     if (!settings.hasToken || !settings.repo) {
       pagePanel.settings.hidden = false;
+      refreshPagePanelTasks();
     }
   }
 
@@ -590,9 +652,11 @@
       repo: pagePanel.repo.value.trim(),
       branch: pagePanel.branch.value.trim() || "main",
       basePath: pagePanel.basePath.value.trim() || "annotations",
+      clipPath: pagePanel.clipPath.value.trim() || "Clippings",
       showSelectionToolbar: pagePanel.showSelectionToolbar.checked,
       backgroundSync: pagePanel.backgroundSync.checked,
-      activationShortcut: pagePanel.activationShortcut.value.trim() || "Ctrl+E"
+      activationShortcut: pagePanel.activationShortcut.value.trim() || "Ctrl+E",
+      clipShortcut: pagePanel.clipShortcut.value.trim() || "Ctrl+O"
     };
     const token = pagePanel.token.value.trim();
     if (token) {
@@ -617,6 +681,259 @@
     } catch (error) {
       setPagePanelStatus(error?.message || String(error), "error");
     }
+  }
+
+  async function saveCurrentPageClipping() {
+    pagePanel = pagePanel || createPagePanel();
+    pagePanel.root.hidden = false;
+    setPagePanelStatus("Extracting main content...");
+
+    try {
+      const clipping = extractPageClipping();
+      setPagePanelStatus("Saving clipping to GitHub...");
+      const response = await sendRuntimeMessage({
+        type: "SAVE_CLIPPING",
+        clipping
+      });
+      if (!response?.ok) {
+        throw new Error(response?.error || "Could not save clipping.");
+      }
+
+      updateClippingStatus(response.clipping);
+    } catch (error) {
+      setPagePanelStatus(error?.message || String(error), "error");
+    }
+  }
+
+  function updateClippingStatus(clipping) {
+    if (!clipping?.id) {
+      return;
+    }
+
+    currentClipping = clipping;
+    renderClippingRetryAction();
+    if (pagePanel && !pagePanel.settings.hidden) {
+      refreshPagePanelTasks();
+    }
+
+    if (clipping.syncStatus === "failed") {
+      cancelClippingPanelClose();
+      setPagePanelStatus(`Clipping sync failed: ${clipping.syncError || "Unknown error."}`, "error");
+      return;
+    }
+
+    if (clipping.syncStatus === "pending") {
+      setPagePanelStatus(`Queued clipping for GitHub sync: ${clipping.path}.`, "success");
+      scheduleClippingPanelClose(clipping.id);
+      return;
+    }
+
+    if (clipping.syncStatus === "syncing") {
+      setPagePanelStatus(`Syncing clipping to GitHub: ${clipping.path}.`);
+      return;
+    }
+
+    setPagePanelStatus(`Saved clipping to ${clipping.path}.`, "success");
+    scheduleClippingPanelClose(clipping.id);
+  }
+
+  async function retryCurrentClippingSync() {
+    if (!currentClipping?.id) {
+      return;
+    }
+
+    setPagePanelStatus("Retrying clipping sync...");
+    try {
+      const response = await sendRuntimeMessage({
+        type: "RETRY_CLIPPING_SYNC",
+        id: currentClipping.id
+      });
+      if (!response?.ok) {
+        throw new Error(response?.error || "Could not retry clipping sync.");
+      }
+      updateClippingStatus(response.clipping);
+    } catch (error) {
+      setPagePanelStatus(error?.message || String(error), "error");
+    }
+  }
+
+  function renderClippingRetryAction() {
+    if (!pagePanel?.clippingActions) {
+      return;
+    }
+    pagePanel.clippingActions.hidden = currentClipping?.syncStatus !== "failed";
+  }
+
+  function scheduleClippingPanelClose(clippingId) {
+    cancelClippingPanelClose();
+    clippingPanelCloseTimer = window.setTimeout(() => {
+      if (!pagePanel || currentClipping?.id !== clippingId || currentClipping?.syncStatus === "failed") {
+        return;
+      }
+      if (!pagePanel.settings.hidden) {
+        return;
+      }
+      pagePanel.root.hidden = true;
+    }, 1000);
+  }
+
+  function cancelClippingPanelClose() {
+    if (clippingPanelCloseTimer) {
+      window.clearTimeout(clippingPanelCloseTimer);
+      clippingPanelCloseTimer = null;
+    }
+  }
+
+  async function refreshPagePanelTasks() {
+    if (!pagePanel?.tasks) {
+      return;
+    }
+
+    try {
+      const response = await sendRuntimeMessage({ type: "LIST_SYNC_TASKS" });
+      renderPagePanelTasks(response.tasks || []);
+    } catch (error) {
+      renderPagePanelTasks([]);
+      setPagePanelStatus(error?.message || String(error), "error");
+    }
+  }
+
+  function renderPagePanelTasks(tasks) {
+    if (!pagePanel?.tasks || !pagePanel?.tasksList) {
+      return;
+    }
+
+    pagePanel.tasks.hidden = !tasks.length;
+    pagePanel.tasksList.textContent = "";
+    if (!tasks.length) {
+      return;
+    }
+
+    for (const task of tasks.slice(0, 5)) {
+      pagePanel.tasksList.append(createPagePanelTask(task));
+    }
+  }
+
+  function createPagePanelTask(task) {
+    const item = document.createElement("article");
+    item.className = "gh-annotator-panel__task";
+
+    const main = document.createElement("div");
+    main.className = "gh-annotator-panel__task-main";
+
+    const label = document.createElement("div");
+    label.className = "gh-annotator-panel__task-label";
+    label.textContent = task.label || (task.type === "clipping" ? "Clipping" : "Annotation");
+
+    const meta = document.createElement("div");
+    meta.className = "gh-annotator-panel__task-meta";
+    meta.textContent = task.path || task.url || "";
+
+    main.append(label, meta);
+
+    const row = document.createElement("div");
+    row.className = "gh-annotator-panel__task-row";
+    const pill = document.createElement("span");
+    pill.className = "gh-annotator-panel__sync-pill";
+    pill.dataset.status = task.status || "pending";
+    pill.textContent = syncStatusLabel(task.status);
+    row.append(pill);
+
+    if (task.status === "failed" && task.error) {
+      const error = document.createElement("span");
+      error.className = "gh-annotator-panel__sync-error";
+      error.textContent = task.error;
+      row.append(error);
+    }
+
+    const actions = document.createElement("div");
+    actions.className = "gh-annotator-panel__task-actions";
+    if (task.status === "failed") {
+      const retry = panelButton("Retry");
+      retry.addEventListener("click", () => retryPagePanelTask(task));
+      actions.append(retry);
+    }
+    if (task.status === "pending" || task.status === "syncing" || task.status === "failed") {
+      const cancel = panelButton("Cancel");
+      cancel.addEventListener("click", () => cancelPagePanelTask(task));
+      actions.append(cancel);
+    }
+
+    item.append(main, row);
+    if (actions.childElementCount) {
+      item.append(actions);
+    }
+    return item;
+  }
+
+  async function retryPagePanelTask(task) {
+    setPagePanelStatus("Retrying task...");
+    try {
+      const response = await sendRuntimeMessage({
+        type: "RETRY_SYNC_TASK",
+        taskType: task.type,
+        id: task.id,
+        url: task.url || location.href
+      });
+      renderPagePanelTasks(response.tasks || []);
+      setPagePanelStatus("Task queued.", "success");
+    } catch (error) {
+      setPagePanelStatus(error?.message || String(error), "error");
+    }
+  }
+
+  async function cancelPagePanelTask(task) {
+    setPagePanelStatus("Canceling task...");
+    try {
+      const response = await sendRuntimeMessage({
+        type: "CANCEL_SYNC_TASK",
+        taskType: task.type,
+        id: task.id
+      });
+      renderPagePanelTasks(response.tasks || []);
+      setPagePanelStatus("Task canceled.", "success");
+    } catch (error) {
+      setPagePanelStatus(error?.message || String(error), "error");
+    }
+  }
+
+  function extractPageClipping() {
+    const DefuddleClass = globalThis.Defuddle?.default || globalThis.Defuddle;
+    if (!DefuddleClass) {
+      throw new Error("Defuddle is not loaded. Reload the extension and refresh this page.");
+    }
+
+    const doc = new DOMParser().parseFromString(document.documentElement.outerHTML, "text/html");
+    const result = new DefuddleClass(doc, {
+      url: location.href,
+      markdown: true,
+      separateMarkdown: true
+    }).parse();
+    const markdown = collapseMarkdown(result.contentMarkdown || result.markdown || result.content || "");
+    if (!markdown || markdown.length < 20) {
+      throw new Error("Defuddle could not find enough main content on this page.");
+    }
+
+    return {
+      url: location.href,
+      title: result.title || document.title || location.href,
+      author: result.author || "",
+      site: result.site || "",
+      domain: result.domain || location.hostname,
+      description: result.description || "",
+      image: result.image || "",
+      favicon: result.favicon || "",
+      published: result.published || "",
+      language: result.language || document.documentElement.lang || "",
+      wordCount: result.wordCount || 0,
+      markdown
+    };
+  }
+
+  function collapseMarkdown(value) {
+    return String(value || "")
+      .replace(/\n{4,}/g, "\n\n\n")
+      .trim();
   }
 
   function renderPagePanelAnnotations() {
@@ -750,6 +1067,9 @@
     if (status === "failed") {
       return "Failed";
     }
+    if (status === "canceled") {
+      return "Canceled";
+    }
     return "Synced";
   }
 
@@ -794,6 +1114,11 @@
     const input = document.createElement("input");
     input.type = type;
     input.placeholder = placeholder;
+    input.autocomplete = type === "password" ? "new-password" : "off";
+    if (type === "password") {
+      input.setAttribute("data-1p-ignore", "true");
+      input.setAttribute("data-lpignore", "true");
+    }
     input.spellcheck = false;
     label.append(input);
     return { label, input };
@@ -1525,6 +1850,7 @@
       ...userSettings,
       showSelectionToolbar: settings.showSelectionToolbar ?? userSettings.showSelectionToolbar,
       activationShortcut: settings.activationShortcut || userSettings.activationShortcut,
+      clipShortcut: settings.clipShortcut || userSettings.clipShortcut,
       backgroundSync: settings.backgroundSync ?? userSettings.backgroundSync
     };
     if (!userSettings.showSelectionToolbar) {

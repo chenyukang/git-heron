@@ -10,7 +10,8 @@
     "activeTab",
     "alarms",
     "sidePanel",
-    "storage"
+    "storage",
+    "unlimitedStorage"
   ],
   "host_permissions": [
     "https://api.github.com/*"
@@ -43,6 +44,7 @@
         "content/content-style.css"
       ],
       "js": [
+        "vendor/defuddle/defuddle.full.js",
         "content/content-script.js"
       ],
       "run_at": "document_idle"

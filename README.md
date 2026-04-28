@@ -34,7 +34,8 @@ The extension stores the token in `chrome.storage.local` and sets the storage ac
 
 The extension uses an in-page right-side panel because Chrome controls the placement of its native side panel. Restricted browser pages may still fall back to the native side panel.
 In settings, the floating selection button can be disabled. When it is disabled, use the configured shortcut to annotate the current selection. The default shortcut is `Ctrl+E`.
-Settings also include `Background sync`. When enabled, saving an annotation updates the local page immediately, queues the GitHub write in the background, and shows per-annotation sync status with a retry action for failed syncs.
+Use the clipping shortcut, default `Ctrl+O`, to extract the page's main content with Defuddle and save it as Markdown under `Clippings/<page title>.md`.
+Settings also include `Background sync`. When enabled, saving an annotation or clipping updates the local page immediately, queues the GitHub write in the background, and shows sync status with a retry action for failed syncs.
 
 Each page is committed as a readable Markdown file. The filename uses the current date plus the page title truncated to 20 characters:
 
@@ -56,6 +57,7 @@ annotations/
 The Markdown frontmatter only keeps a short `annotation_data` pointer to that sidecar file.
 
 Saving an annotation updates the Markdown file, the sidecar metadata file, and any old dated filename removal in one Git commit. With background sync enabled, that commit is created by the background queue after the annotation is saved locally.
+Saving a clipping writes a separate Markdown file to the configured clip path. With background sync enabled, the clipping is queued locally first and committed to GitHub by the background worker.
 
 ## Current scope
 
@@ -64,5 +66,6 @@ Saving an annotation updates the Markdown file, the sidecar metadata file, and a
 - Automatically restores page highlights from GitHub when a page opens.
 - Shows the current page annotation count as a badge on the extension button.
 - Caches page annotations locally and can sync them back from GitHub.
+- Uses the vendored Defuddle browser bundle for main-content clipping.
 - Clicking a highlight opens the saved note in an in-page extension panel and also tries to open the Chrome side panel.
 - PDF support is intentionally left for a later phase because browser PDF viewers are not ordinary pages for content script injection.

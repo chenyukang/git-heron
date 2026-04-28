@@ -528,6 +528,86 @@
   color: #047857;
 }
 
+.gh-annotator-panel__clip-actions {
+  display: flex;
+  flex: 0 0 auto;
+  justify-content: flex-end;
+  padding: 8px 12px 0;
+}
+
+.gh-annotator-panel__clip-actions[hidden] {
+  display: none;
+}
+
+.gh-annotator-panel__tasks {
+  display: grid;
+  gap: 8px;
+  padding-top: 4px;
+  border-top: 1px solid #edf0f6;
+}
+
+.gh-annotator-panel__tasks[hidden] {
+  display: none;
+}
+
+.gh-annotator-panel__tasks-heading {
+  color: #111827;
+  font-size: 12px;
+  font-weight: 750;
+}
+
+.gh-annotator-panel__tasks-list {
+  display: grid;
+  gap: 7px;
+}
+
+.gh-annotator-panel__task {
+  display: grid;
+  gap: 6px;
+  padding: 8px;
+  border: 1px solid #edf0f6;
+  border-radius: 6px;
+  background: #f8fafc;
+}
+
+.gh-annotator-panel__task-main,
+.gh-annotator-panel__task-row,
+.gh-annotator-panel__task-actions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+}
+
+.gh-annotator-panel__task-main {
+  flex-direction: column;
+  align-items: stretch;
+}
+
+.gh-annotator-panel__task-label,
+.gh-annotator-panel__task-meta {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.gh-annotator-panel__task-label {
+  color: #111827;
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.gh-annotator-panel__task-meta {
+  color: #667085;
+  font-size: 11px;
+}
+
+.gh-annotator-panel__task-actions {
+  justify-content: flex-end;
+  flex-wrap: wrap;
+}
+
 .gh-annotator-panel__list {
   display: flex;
   flex: 1 1 auto;
@@ -592,6 +672,11 @@
 .gh-annotator-panel__sync-pill[data-status="failed"] {
   background: #fff1f2;
   color: #be123c;
+}
+
+.gh-annotator-panel__sync-pill[data-status="canceled"] {
+  background: #f1f5f9;
+  color: #475569;
 }
 
 .gh-annotator-panel__sync-error {
@@ -816,7 +901,30 @@
     color: #fecdd3;
   }
 
+  .gh-annotator-panel__sync-pill[data-status="canceled"] {
+    background: #1e293b;
+    color: #cbd5e1;
+  }
+
   .gh-annotator-panel__sync-error {
     color: #fda4af;
+  }
+
+  .gh-annotator-panel__tasks {
+    border-top-color: #1e293b;
+  }
+
+  .gh-annotator-panel__tasks-heading,
+  .gh-annotator-panel__task-label {
+    color: #f8fafc;
+  }
+
+  .gh-annotator-panel__task {
+    border-color: #1e293b;
+    background: #111827;
+  }
+
+  .gh-annotator-panel__task-meta {
+    color: #94a3b8;
   }
 }

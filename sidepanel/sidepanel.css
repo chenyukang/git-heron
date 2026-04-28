@@ -212,6 +212,46 @@ textarea:focus {
   justify-content: flex-end;
 }
 
+.tasks-panel {
+  display: grid;
+  gap: 8px;
+  padding-top: 4px;
+  border-top: 1px solid var(--line);
+}
+
+.tasks-list {
+  display: grid;
+  gap: 7px;
+}
+
+.task-item {
+  display: grid;
+  gap: 6px;
+  padding: 8px;
+  border: 1px solid #edf0f6;
+  border-radius: 6px;
+  background: #f8fafc;
+}
+
+.task-label,
+.task-meta {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.task-label {
+  color: #111827;
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.task-meta {
+  color: var(--muted);
+  font-size: 11px;
+}
+
 .primary {
   border-color: var(--blue);
   background: var(--blue);
@@ -371,6 +411,11 @@ textarea:focus {
   color: #be123c;
 }
 
+.sync-pill[data-status="canceled"] {
+  background: #f1f5f9;
+  color: #475569;
+}
+
 .sync-error {
   min-width: 0;
   overflow: hidden;
@@ -473,6 +518,11 @@ textarea:focus {
     color: #fecdd3;
   }
 
+  .sync-pill[data-status="canceled"] {
+    background: #1e293b;
+    color: #cbd5e1;
+  }
+
   .sync-error {
     color: #fda4af;
   }
@@ -480,6 +530,15 @@ textarea:focus {
   .annotation-item {
     border-bottom-color: #1e293b;
     background: var(--panel);
+  }
+
+  .task-item {
+    border-color: #1e293b;
+    background: #111827;
+  }
+
+  .task-label {
+    color: #f8fafc;
   }
 
   .annotation-quote {

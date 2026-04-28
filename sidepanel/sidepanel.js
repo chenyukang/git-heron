@@ -12,15 +12,19 @@ const elements = {
   status: document.querySelector("#status"),
   settingsPanel: document.querySelector("#settings-panel"),
   selectionPanel: document.querySelector("#selection-panel"),
+  tasksPanel: document.querySelector("#tasks-panel"),
+  tasksList: document.querySelector("#tasks-list"),
   settingsToggle: document.querySelector("#settings-toggle"),
   settingsState: document.querySelector("#settings-state"),
   token: document.querySelector("#token"),
   repo: document.querySelector("#repo"),
   branch: document.querySelector("#branch"),
   basePath: document.querySelector("#base-path"),
+  clipPath: document.querySelector("#clip-path"),
   showSelectionToolbar: document.querySelector("#show-selection-toolbar"),
   backgroundSync: document.querySelector("#background-sync"),
   activationShortcut: document.querySelector("#activation-shortcut"),
+  clipShortcut: document.querySelector("#clip-shortcut"),
   saveSettings: document.querySelector("#save-settings"),
   testSettings: document.querySelector("#test-settings"),
   draftState: document.querySelector("#draft-state"),
@@ -43,6 +47,14 @@ chrome.runtime.onMessage.addListener((message) => {
 
   if (message?.type === "ANNOTATION_SYNC_UPDATED") {
     updateLocalAnnotation(message.annotation);
+  }
+
+  if (message?.type === "CLIPPING_SYNC_UPDATED") {
+    renderClippingStatus(message.clipping);
+  }
+
+  if (message?.type === "SYNC_TASKS_UPDATED" && !elements.settingsPanel.hidden) {
+    renderSyncTasks(message.tasks || []);
   }
 });
 
@@ -83,9 +95,11 @@ function renderSettings() {
   elements.repo.value = state.settings?.repo || "";
   elements.branch.value = state.settings?.branch || "main";
   elements.basePath.value = state.settings?.basePath || "annotations";
+  elements.clipPath.value = state.settings?.clipPath || "Clippings";
   elements.showSelectionToolbar.checked = state.settings?.showSelectionToolbar ?? true;
   elements.backgroundSync.checked = state.settings?.backgroundSync ?? false;
   elements.activationShortcut.value = state.settings?.activationShortcut || "Ctrl+E";
+  elements.clipShortcut.value = state.settings?.clipShortcut || "Ctrl+O";
   elements.token.placeholder = state.settings?.hasToken ? "Saved token" : "github_pat_...";
 
   const connected = Boolean(state.settings?.hasToken && state.settings?.repo);
@@ -96,6 +110,9 @@ function renderSettings() {
 function setSettingsPanelVisible(visible) {
   elements.settingsPanel.hidden = !visible;
   elements.settingsToggle.setAttribute("aria-expanded", String(visible));
+  if (visible) {
+    refreshSyncTasks();
+  }
 }
 
 async function refreshPageState() {
@@ -147,9 +164,11 @@ async function saveSettings() {
     repo: elements.repo.value.trim(),
     branch: elements.branch.value.trim() || "main",
     basePath: elements.basePath.value.trim() || "annotations",
+    clipPath: elements.clipPath.value.trim() || "Clippings",
     showSelectionToolbar: elements.showSelectionToolbar.checked,
     backgroundSync: elements.backgroundSync.checked,
-    activationShortcut: elements.activationShortcut.value.trim() || "Ctrl+E"
+    activationShortcut: elements.activationShortcut.value.trim() || "Ctrl+E",
+    clipShortcut: elements.clipShortcut.value.trim() || "Ctrl+O"
   };
   if (token) {
     payload.token = token;
@@ -174,9 +193,11 @@ async function testSettings() {
     repo: elements.repo.value.trim(),
     branch: elements.branch.value.trim() || "main",
     basePath: elements.basePath.value.trim() || "annotations",
+    clipPath: elements.clipPath.value.trim() || "Clippings",
     showSelectionToolbar: elements.showSelectionToolbar.checked,
     backgroundSync: elements.backgroundSync.checked,
-    activationShortcut: elements.activationShortcut.value.trim() || "Ctrl+E"
+    activationShortcut: elements.activationShortcut.value.trim() || "Ctrl+E",
+    clipShortcut: elements.clipShortcut.value.trim() || "Ctrl+O"
   };
   if (token) {
     payload.token = token;
@@ -384,6 +405,109 @@ async function retryAnnotationSync(annotation) {
   }
 }
 
+async function refreshSyncTasks() {
+  try {
+    const response = await sendRuntime({ type: "LIST_SYNC_TASKS" });
+    renderSyncTasks(response.tasks || []);
+  } catch {
+    renderSyncTasks([]);
+  }
+}
+
+function renderSyncTasks(tasks) {
+  elements.tasksPanel.hidden = !tasks.length;
+  elements.tasksList.textContent = "";
+  if (!tasks.length) {
+    return;
+  }
+
+  for (const task of tasks.slice(0, 5)) {
+    elements.tasksList.append(renderTaskItem(task));
+  }
+}
+
+function renderTaskItem(task) {
+  const item = document.createElement("article");
+  item.className = "task-item";
+
+  const label = document.createElement("div");
+  label.className = "task-label";
+  label.textContent = task.label || (task.type === "clipping" ? "Clipping" : "Annotation");
+  item.append(label);
+
+  const meta = document.createElement("div");
+  meta.className = "task-meta";
+  meta.textContent = task.path || task.url || "";
+  item.append(meta);
+
+  const sync = document.createElement("div");
+  sync.className = "annotation-sync";
+  const pill = document.createElement("span");
+  pill.className = "sync-pill";
+  pill.dataset.status = task.status || "pending";
+  pill.textContent = syncStatusLabel(task.status);
+  sync.append(pill);
+  if (task.status === "failed" && task.error) {
+    const error = document.createElement("span");
+    error.className = "sync-error";
+    error.textContent = task.error;
+    sync.append(error);
+  }
+  item.append(sync);
+
+  const actions = document.createElement("div");
+  actions.className = "annotation-actions";
+  if (task.status === "failed") {
+    const retry = document.createElement("button");
+    retry.type = "button";
+    retry.textContent = "Retry";
+    retry.addEventListener("click", () => retrySyncTask(task));
+    actions.append(retry);
+  }
+  if (task.status === "pending" || task.status === "syncing" || task.status === "failed") {
+    const cancel = document.createElement("button");
+    cancel.type = "button";
+    cancel.textContent = "Cancel";
+    cancel.addEventListener("click", () => cancelSyncTask(task));
+    actions.append(cancel);
+  }
+  if (actions.childElementCount) {
+    item.append(actions);
+  }
+  return item;
+}
+
+async function retrySyncTask(task) {
+  showStatus("Retrying task...");
+  try {
+    const response = await sendRuntime({
+      type: "RETRY_SYNC_TASK",
+      taskType: task.type,
+      id: task.id,
+      url: task.url || state.page?.url
+    });
+    renderSyncTasks(response.tasks || []);
+    showStatus("Task queued.", "success");
+  } catch (error) {
+    showStatus(readableError(error), "error");
+  }
+}
+
+async function cancelSyncTask(task) {
+  showStatus("Canceling task...");
+  try {
+    const response = await sendRuntime({
+      type: "CANCEL_SYNC_TASK",
+      taskType: task.type,
+      id: task.id
+    });
+    renderSyncTasks(response.tasks || []);
+    showStatus("Task canceled.", "success");
+  } catch (error) {
+    showStatus(readableError(error), "error");
+  }
+}
+
 function updateLocalAnnotation(annotation) {
   if (!annotation?.id) {
     return;
@@ -407,7 +531,26 @@ function syncStatusLabel(status) {
   if (status === "failed") {
     return "Failed";
   }
+  if (status === "canceled") {
+    return "Canceled";
+  }
   return "Synced";
+}
+
+function renderClippingStatus(clipping) {
+  if (!clipping?.id) {
+    return;
+  }
+
+  if (clipping.syncStatus === "failed") {
+    showStatus(`Clipping sync failed: ${clipping.syncError || "Unknown error."}`, "error");
+  } else if (clipping.syncStatus === "pending") {
+    showStatus(`Queued clipping for GitHub sync: ${clipping.path}.`, "success");
+  } else if (clipping.syncStatus === "syncing") {
+    showStatus(`Syncing clipping to GitHub: ${clipping.path}.`);
+  } else {
+    showStatus(`Saved clipping to ${clipping.path}.`, "success");
+  }
 }
 
 function parseTags(value) {

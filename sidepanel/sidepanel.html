@@ -26,7 +26,7 @@
 
         <label>
           Token
-          <input id="token" type="password" autocomplete="off" placeholder="github_pat_...">
+          <input id="token" type="password" autocomplete="new-password" data-1p-ignore="true" data-lpignore="true" placeholder="github_pat_...">
         </label>
 
         <label>
@@ -45,6 +45,11 @@
           </label>
         </div>
 
+        <label>
+          Clip path
+          <input id="clip-path" type="text" spellcheck="false" placeholder="Clippings">
+        </label>
+
         <label class="checkbox-label">
           <input id="show-selection-toolbar" type="checkbox">
           Show floating button
@@ -60,10 +65,22 @@
           <input id="activation-shortcut" type="text" spellcheck="false" placeholder="Ctrl+E">
         </label>
 
+        <label>
+          Clip shortcut
+          <input id="clip-shortcut" type="text" spellcheck="false" placeholder="Ctrl+O">
+        </label>
+
         <div class="button-row">
           <button id="save-settings" class="primary" type="button">Save</button>
           <button id="test-settings" type="button">Test</button>
         </div>
+
+        <section id="tasks-panel" class="tasks-panel" hidden>
+          <div class="section-heading">
+            <h2>Tasks</h2>
+          </div>
+          <div id="tasks-list" class="tasks-list"></div>
+        </section>
       </section>
 
       <section id="selection-panel" class="panel" hidden>
