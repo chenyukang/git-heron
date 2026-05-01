@@ -10,7 +10,7 @@
     showSelectionToolbar: true,
     activationShortcut: "Ctrl+E",
     clipShortcut: "Ctrl+O",
-    backgroundSync: false
+    backgroundSync: true
   };
 
   let toolbar = null;
@@ -628,7 +628,7 @@
     pagePanel.basePath.value = settings.basePath || "annotations";
     pagePanel.clipPath.value = settings.clipPath || "Clippings";
     pagePanel.showSelectionToolbar.checked = settings.showSelectionToolbar ?? true;
-    pagePanel.backgroundSync.checked = settings.backgroundSync ?? false;
+    pagePanel.backgroundSync.checked = settings.backgroundSync ?? true;
     pagePanel.activationShortcut.value = settings.activationShortcut || "Ctrl+E";
     pagePanel.clipShortcut.value = settings.clipShortcut || "Ctrl+O";
     pagePanel.token.placeholder = settings.hasToken ? "Saved token" : "github_pat_...";
@@ -1051,13 +1051,27 @@
     return [...annotationsById.values()].sort((a, b) => (b.createdAt || "").localeCompare(a.createdAt || ""));
   }
 
+  function removeLocalAnnotation(id) {
+    if (!id) {
+      return;
+    }
+
+    findHighlightMarks(id).forEach(unwrapHighlightMark);
+    annotationsById.delete(id);
+    renderPagePanelAnnotations();
+  }
+
   function updateLocalAnnotation(annotation) {
     if (!annotation?.id) {
       return;
     }
 
     annotationsById.set(annotation.id, annotation);
-    updateAnnotationMarks(annotation);
+    if (document.querySelector(`[data-gh-annotation-id="${cssEscape(annotation.id)}"]`)) {
+      updateAnnotationMarks(annotation);
+    } else {
+      applyAnnotations([annotation]);
+    }
     renderPagePanelAnnotations();
     if (annotation.syncStatus === "failed") {
       setPagePanelStatus(`Sync failed: ${annotation.syncError || "Unknown error."}`, "error");
@@ -1311,12 +1325,26 @@
     editor.save.disabled = true;
     setEditorStatus("Saving...");
 
+    const isNewAnnotation = !editor.draft.id;
+    const now = new Date().toISOString();
     const annotation = {
       ...editor.draft,
+      id: editor.draft.id || createLocalAnnotationId(),
       note: editor.note.value.trim(),
       tags: tagPickerTags(editor.tags),
-      color: editorColor
+      color: editorColor,
+      createdAt: editor.draft.createdAt || now,
+      updatedAt: now,
+      syncStatus: userSettings.backgroundSync ? "pending" : "syncing",
+      syncError: ""
     };
+
+    annotationsById.set(annotation.id, annotation);
+    if (!promoteDraftHighlight(annotation)) {
+      applyAnnotations([annotation]);
+    }
+    updateAnnotationMarks(annotation);
+    renderPagePanelAnnotations();
 
     try {
       const response = await sendRuntimeMessage({
@@ -1338,6 +1366,9 @@
       setEditorStatus(syncStatus === "synced" ? "Saved to GitHub." : "Queued for GitHub sync.", "success");
       window.setTimeout(closeEditor, 450);
     } catch (error) {
+      if (isNewAnnotation) {
+        removeLocalAnnotation(annotation.id);
+      }
       setEditorStatus(error?.message || String(error), "error");
     } finally {
       editor.save.disabled = false;
@@ -1660,6 +1691,17 @@
     });
   }
 
+  function createLocalAnnotationId() {
+    try {
+      const random = new Uint8Array(8);
+      crypto.getRandomValues(random);
+      const suffix = [...random].map((byte) => byte.toString(16).padStart(2, "0")).join("");
+      return `${Date.now().toString(36)}-${suffix}`;
+    } catch (_error) {
+      return `${Date.now().toString(36)}-${Math.random().toString(16).slice(2, 18)}`;
+    }
+  }
+
   function findHighlightMarks(id) {
     if (!id) {
       return [];
@@ -1819,22 +1861,42 @@
     }
 
     const textIndex = buildTextIndex();
-    const exact = selector.exact;
-    let start = Number.isInteger(selector.start) ? selector.start : -1;
-
-    if (start >= 0 && textIndex.fullText.slice(start, start + exact.length) !== exact) {
-      start = -1;
+    const offsetMatch = findStoredOffsetMatch(textIndex.fullText, selector);
+    if (offsetMatch) {
+      return rangeFromOffsets(textIndex.nodes, offsetMatch.start, offsetMatch.end);
     }
 
-    if (start < 0) {
-      start = findBestTextMatch(textIndex.fullText, selector);
-    }
-
-    if (start < 0) {
+    const textMatch = findBestTextMatch(textIndex.fullText, selector);
+    if (!textMatch) {
       return null;
     }
 
-    return rangeFromOffsets(textIndex.nodes, start, start + exact.length);
+    return rangeFromOffsets(textIndex.nodes, textMatch.start, textMatch.end);
+  }
+
+  function findStoredOffsetMatch(fullText, selector) {
+    const exact = selector.exact;
+    const start = Number.isInteger(selector.start) ? selector.start : -1;
+    if (start < 0 || start >= fullText.length) {
+      return null;
+    }
+
+    const ends = [];
+    if (Number.isInteger(selector.end) && selector.end > start) {
+      ends.push(selector.end);
+    }
+    ends.push(start + exact.length);
+
+    const normalizedExact = normalizeMatchText(exact);
+    for (const rawEnd of ends) {
+      const end = Math.min(fullText.length, rawEnd);
+      const candidate = fullText.slice(start, end);
+      if (candidate === exact || normalizeMatchText(candidate) === normalizedExact) {
+        return { start, end };
+      }
+    }
+
+    return null;
   }
 
   function findBestTextMatch(fullText, selector) {
@@ -1850,12 +1912,82 @@
       if (selector.suffix && fullText.slice(index + exact.length, index + exact.length + selector.suffix.length) === selector.suffix) {
         score += selector.suffix.length;
       }
-      candidates.push({ index, score });
+      candidates.push({ start: index, end: index + exact.length, score });
       index = fullText.indexOf(exact, index + exact.length);
     }
 
+    const normalizedMatch = findBestNormalizedTextMatch(fullText, selector);
+    if (normalizedMatch) {
+      candidates.push(normalizedMatch);
+    }
+
     candidates.sort((a, b) => b.score - a.score);
-    return candidates[0]?.index ?? -1;
+    return candidates[0] || null;
+  }
+
+  function findBestNormalizedTextMatch(fullText, selector) {
+    const exact = normalizeMatchText(selector.exact);
+    if (!exact) {
+      return null;
+    }
+
+    const normalized = buildNormalizedTextMap(fullText);
+    const prefix = normalizeMatchText(selector.prefix || "");
+    const suffix = normalizeMatchText(selector.suffix || "");
+    const candidates = [];
+    let index = normalized.text.indexOf(exact);
+
+    while (index >= 0 && candidates.length < 80) {
+      let score = 0;
+      if (prefix && normalized.text.slice(Math.max(0, index - prefix.length), index) === prefix) {
+        score += prefix.length;
+      }
+      if (suffix && normalized.text.slice(index + exact.length, index + exact.length + suffix.length) === suffix) {
+        score += suffix.length;
+      }
+
+      const start = normalized.offsets[index];
+      const afterIndex = index + exact.length;
+      const end = afterIndex < normalized.offsets.length
+        ? normalized.offsets[afterIndex]
+        : fullText.length;
+      if (Number.isInteger(start) && end > start) {
+        candidates.push({ start, end, score });
+      }
+
+      index = normalized.text.indexOf(exact, index + exact.length);
+    }
+
+    candidates.sort((a, b) => b.score - a.score);
+    return candidates[0] || null;
+  }
+
+  function normalizeMatchText(value) {
+    return String(value || "").replace(/\s+/g, " ").trim();
+  }
+
+  function buildNormalizedTextMap(fullText) {
+    let text = "";
+    const offsets = [];
+    let inWhitespace = false;
+
+    for (let index = 0; index < fullText.length; index += 1) {
+      const char = fullText[index];
+      if (/\s/.test(char)) {
+        if (!inWhitespace) {
+          text += " ";
+          offsets.push(index);
+          inWhitespace = true;
+        }
+        continue;
+      }
+
+      text += char;
+      offsets.push(index);
+      inWhitespace = false;
+    }
+
+    return { text: text.trimStart(), offsets: offsets.slice(text.length - text.trimStart().length) };
   }
 
   function rangeFromOffsets(nodes, start, end) {
