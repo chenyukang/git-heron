@@ -2,7 +2,7 @@
   "manifest_version": 3,
   "name": "GitHub Web Annotator",
   "description": "Highlight web pages and sync annotations directly to a GitHub repository.",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "action": {
     "default_title": "GitHub Web Annotator"
   },
