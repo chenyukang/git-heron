@@ -9,13 +9,25 @@
   "permissions": [
     "activeTab",
     "alarms",
-    "sidePanel",
     "storage",
     "unlimitedStorage"
   ],
   "host_permissions": [
     "https://api.github.com/*"
   ],
+  "browser_specific_settings": {
+    "gecko": {
+      "id": "githeron@chenyukang.github.io",
+      "strict_min_version": "142.0",
+      "data_collection_permissions": {
+        "required": [
+          "authenticationInfo",
+          "websiteActivity",
+          "websiteContent"
+        ]
+      }
+    }
+  },
   "web_accessible_resources": [
     {
       "resources": [
@@ -28,11 +40,14 @@
     }
   ],
   "background": {
-    "service_worker": "background/service-worker.js",
-    "type": "module"
+    "scripts": [
+      "browser-polyfill.js",
+      "background/service-worker.js"
+    ]
   },
-  "side_panel": {
-    "default_path": "sidepanel/sidepanel.html"
+  "sidebar_action": {
+    "default_title": "GitHeron",
+    "default_panel": "sidepanel/sidepanel.html"
   },
   "content_scripts": [
     {

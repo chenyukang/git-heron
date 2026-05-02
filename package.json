@@ -1,8 +1,11 @@
 {
   "name": "git-heron",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "private": true,
   "scripts": {
+    "build": "node scripts/build.mjs all",
+    "build:chrome": "node scripts/build.mjs chrome",
+    "build:firefox": "node scripts/build.mjs firefox",
     "check": "node --check content/content-script.js && node --check background/service-worker.js",
     "test": "node --test tests/*.test.mjs"
   }

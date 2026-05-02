@@ -1,17 +1,58 @@
-# GitHub Web Annotator
+# GitHeron
 
 > Web highlights and clippings, synced to GitHub as Markdown.
 
-Github Web Annotator is [web.hypothes](https://web.hypothes.is/) like chrome extension, but instead of saving annotations to a central server, it saves them as Markdown files in a GitHub repository. This allows users to keep their annotations private, version-controlled, and easily accessible alongside their other code or notes.
+GitHeron is a [Hypothesis](https://web.hypothes.is/)-style browser extension. Instead of saving annotations to a central server, it saves highlights, notes, tags, and page clippings as Markdown files in a GitHub repository.
 
-You just need one Github repo and a token with write access to that repo, everything works!
+You only need one GitHub repository and a token with write access to that repository.
 
-## Load locally
+## Browser Support
 
-1. Open `chrome://extensions`.
-2. Enable Developer mode.
-3. Choose **Load unpacked**.
-4. Select this directory: `/path/to/git-heron`.
+- Chrome and Chromium browsers use `manifest.json` with Chrome `side_panel`.
+- Firefox uses `manifest.firefox.json` with Firefox `sidebar_action` and background scripts. The packaged Firefox build targets Firefox 142 or newer.
+- The in-page right-side panel works in both browsers on normal `http` and `https` pages.
+- Firefox signing uses the Gecko extension ID in `manifest.firefox.json`.
+
+## Build Packages
+
+```bash
+npm run build
+```
+
+This creates two release packages:
+
+```text
+dist/githeron-chrome-v<version>.zip
+dist/githeron-firefox-v<version>.zip
+```
+
+For a single browser:
+
+```bash
+npm run build:chrome
+npm run build:firefox
+```
+
+## Load Locally
+
+### Chrome
+
+1. Run `npm run build:chrome`.
+2. Open `chrome://extensions`.
+3. Enable **Developer mode**.
+4. Choose **Load unpacked**.
+5. Select `dist/chrome`.
+
+You can also load the repository root directly during development.
+
+### Firefox
+
+1. Run `npm run build:firefox`.
+2. Open `about:debugging#/runtime/this-firefox`.
+3. Choose **Load Temporary Add-on...**.
+4. Select `dist/firefox/manifest.json`.
+
+Firefox temporary add-ons are removed when Firefox restarts, so load the package again after a browser restart.
 
 ## GitHub token
 
@@ -20,7 +61,7 @@ Use a fine-grained personal access token scoped to one repository. The token nee
 - Repository access: the target repository only
 - Repository permissions: **Contents: Read and write**
 
-The extension stores the token in `chrome.storage.local` and sets the storage access level to trusted extension contexts so content scripts cannot read it directly.
+The extension stores the token in extension local storage and sets the storage access level to trusted extension contexts when the browser supports it, so content scripts cannot read it directly.
 
 ## Usage
 
@@ -30,7 +71,7 @@ The extension stores the token in `chrome.storage.local` and sets the storage ac
 4. Press the floating annotation button.
 5. Add a note or tags in the in-page editor, then save.
 
-The extension uses an in-page right-side panel because Chrome controls the placement of its native side panel. Restricted browser pages may still fall back to the native side panel.
+The extension uses an in-page right-side panel because browsers control the placement of native sidebars. Restricted browser pages may still fall back to the native browser sidebar or fail to host the in-page panel.
 In settings, the floating selection button can be disabled. When it is disabled, use the configured shortcut to annotate the current selection. The default shortcut is `Ctrl+E`.
 Use the clipping shortcut, default `Ctrl+O`, to extract the page's main content with Defuddle and save it as Markdown under `Clippings/<page title>.md`.
 Settings also include `Background sync`. When enabled, saving an annotation or clipping updates the local page immediately, queues the GitHub write in the background, and shows sync status with a retry action for failed syncs.
@@ -67,5 +108,14 @@ Saving a clipping writes a separate Markdown file to the configured clip path. W
 - Caches page annotations locally and can sync them back from GitHub.
 - Stores recently used tags locally and shows them as quick-select chips when adding notes.
 - Uses the vendored Defuddle browser bundle for main-content clipping.
-- Clicking a highlight opens the saved note in an in-page extension panel and also tries to open the Chrome side panel.
+- Clicking a highlight opens the saved note in an in-page extension panel and also tries to open the native browser sidebar when available.
 - PDF support is intentionally left for a later phase because browser PDF viewers are not ordinary pages for content script injection.
+
+## Release
+
+Publish Chrome and Firefox as separate assets for the same tag:
+
+```text
+githeron-chrome-v<version>.zip
+githeron-firefox-v<version>.zip
+```

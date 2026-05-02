@@ -128,9 +128,6 @@ function createChromeMock() {
         onStartup: event,
         sendMessage: async () => ({})
       },
-      sidePanel: {
-        setPanelBehavior: async () => {}
-      },
       storage: {
         local,
         session: storageArea({})

@@ -59,12 +59,6 @@ async function setupExtension() {
   }
 
   try {
-    await chrome.sidePanel.setPanelBehavior({ openPanelOnActionClick: false });
-  } catch {
-    // The panel can still be opened from Chrome's side panel menu.
-  }
-
-  try {
     await chrome.action.setBadgeBackgroundColor({ color: "#2563eb" });
   } catch {
     // Badge styling is cosmetic.
