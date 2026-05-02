@@ -47,12 +47,31 @@ You can also load the repository root directly during development.
 
 ### Firefox
 
+Firefox must load the Firefox package, not the repository root. The repository root uses the Chrome manifest.
+
+To try the released build:
+
+1. Download `githeron-firefox-v<version>.zip` from the GitHub release.
+2. Unzip it to a local folder.
+3. Open `about:debugging#/runtime/this-firefox` in Firefox.
+4. Choose **Load Temporary Add-on...**.
+5. Select the unzipped `manifest.json`.
+
+For local development:
+
 1. Run `npm run build:firefox`.
 2. Open `about:debugging#/runtime/this-firefox`.
 3. Choose **Load Temporary Add-on...**.
 4. Select `dist/firefox/manifest.json`.
 
-Firefox temporary add-ons are removed when Firefox restarts, so load the package again after a browser restart.
+Firefox temporary add-ons are removed when Firefox restarts, so load the package again after a browser restart. For permanent installation, the Firefox build needs to be signed through Mozilla Add-ons or Firefox self-distribution.
+
+#### Notes for Firefox:
+
+- The native Firefox sidebar may appear on the left because Firefox owns native sidebar placement. GitHeron still uses its in-page right-side panel for normal web pages.
+- If clicking the toolbar button does nothing, reload the current tab after loading the temporary add-on. Existing tabs may not have the content script yet.
+- Restricted pages such as `about:*`, browser settings, extension pages, and some store pages cannot host the in-page panel or highlights.
+- The Firefox package targets Firefox 142 or newer.
 
 ## GitHub token
 
