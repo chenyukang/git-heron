@@ -49,6 +49,39 @@ test("remote refresh keeps failed and pending local annotations", async () => {
   assert.deepEqual(merged.map((item) => item.id).sort(), ["failed", "pending", "remote"]);
 });
 
+test("content ready serves syncing cached annotations without waiting for GitHub", async () => {
+  const url = "https://example.com/syncing";
+  const { cacheAnnotation, loadPageAnnotationsForContent, localStore } = loadServiceWorkerForTest({
+    fetch: async () => new Promise(() => {})
+  });
+  localStore.settings = {
+    token: "ghp_test",
+    repo: "owner/name",
+    owner: "owner",
+    name: "name",
+    branch: "main",
+    basePath: "annotations"
+  };
+
+  await cacheAnnotation(annotation("syncing", url, 10, { syncStatus: "syncing" }));
+
+  const annotations = await Promise.race([
+    loadPageAnnotationsForContent(url, "Pending page", 1),
+    new Promise((_, reject) => setTimeout(() => reject(new Error("Timed out waiting for cached annotations.")), 25))
+  ]);
+
+  assert.equal(annotations.length, 1);
+  assert.equal(annotations[0].id, "syncing");
+});
+
+test("content ready does not serve failed cached annotations before remote refresh", () => {
+  const { shouldServeCachedAnnotationsImmediately } = loadServiceWorkerForTest();
+
+  assert.equal(shouldServeCachedAnnotationsImmediately([
+    annotation("failed", "https://example.com/failed", 10, { syncStatus: "failed" })
+  ]), false);
+});
+
 test("GitHub requests bypass browser caches", async () => {
   let request;
   const { githubRequest } = loadServiceWorkerForTest({

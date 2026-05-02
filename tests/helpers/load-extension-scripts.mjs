@@ -35,8 +35,10 @@ globalThis.__gitHeronServiceWorkerTestExports = {
   equivalentAnnotation,
   getCachedAnnotations,
   githubRequest,
+  loadPageAnnotationsForContent,
   markAnnotationSyncState,
   replaceCachedAnnotations,
+  shouldServeCachedAnnotationsImmediately,
   shouldKeepLocalAnnotationDuringRemoteRefresh
 };`;
 

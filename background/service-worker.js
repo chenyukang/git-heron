@@ -304,7 +304,7 @@ async function notifyDraftUpdated(tabId, draft) {
 }
 
 async function contentReady(page, tabId) {
-  const annotations = await loadPageAnnotationsForContent(page?.url, page?.title);
+  const annotations = await loadPageAnnotationsForContent(page?.url, page?.title, tabId);
   await updatePageBadge(tabId, page?.url, annotations.length);
   return { annotations, settings: sanitizeSettings(await getSettings()) };
 }
@@ -1038,7 +1038,7 @@ async function listRemoteAnnotationsForTab(url, title, tabId) {
   return { annotations };
 }
 
-async function loadPageAnnotationsForContent(url, title = "") {
+async function loadPageAnnotationsForContent(url, title = "", tabId = null) {
   const cached = await getCachedAnnotations(url);
 
   try {
@@ -1046,10 +1046,32 @@ async function loadPageAnnotationsForContent(url, title = "") {
     if (!settings.token || !settings.owner || !settings.name) {
       return cached;
     }
+    if (shouldServeCachedAnnotationsImmediately(cached)) {
+      refreshPageAnnotationsInBackground(url, title, tabId);
+      return cached;
+    }
     return await listRemoteAnnotations(url, title);
   } catch {
     return cached;
   }
+}
+
+function shouldServeCachedAnnotationsImmediately(annotations) {
+  return (annotations || []).some(shouldServeLocalAnnotationImmediately);
+}
+
+function refreshPageAnnotationsInBackground(url, title = "", tabId = null) {
+  listRemoteAnnotations(url, title)
+    .then(async (annotations) => {
+      await updatePageBadge(tabId, url, annotations.length);
+      if (tabId != null) {
+        await chrome.tabs.sendMessage(tabId, { type: "APPLY_ANNOTATIONS", annotations });
+      }
+    })
+    .catch((error) => debugWarn("refreshPageAnnotationsInBackground:failed", {
+      url,
+      message: formatError(error)
+    }));
 }
 
 async function updateBadgeForUrl(tabId, url) {
@@ -1624,6 +1646,19 @@ function isUnsyncedAnnotation(annotation) {
 
 function shouldKeepLocalAnnotationDuringRemoteRefresh(annotation) {
   if (isUnsyncedAnnotation(annotation)) {
+    return true;
+  }
+
+  if ((annotation?.syncStatus || "synced") !== "synced") {
+    return false;
+  }
+
+  const timestamp = Date.parse(annotation.syncSyncedAt || annotation.syncUpdatedAt || "");
+  return Number.isFinite(timestamp) && Date.now() - timestamp < RECENT_LOCAL_SYNC_RETENTION_MS;
+}
+
+function shouldServeLocalAnnotationImmediately(annotation) {
+  if (annotation?.syncStatus === "pending" || annotation?.syncStatus === "syncing") {
     return true;
   }
 
