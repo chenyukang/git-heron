@@ -59,6 +59,12 @@
       return false;
     }
 
+    if (message?.type === "ANNOTATION_DELETED") {
+      removeLocalAnnotation(message.id);
+      sendResponse({ deleted: true });
+      return false;
+    }
+
     if (message?.type === "CLIPPING_SYNC_UPDATED") {
       updateClippingStatus(message.clipping);
       sendResponse({ updated: true });
@@ -1021,10 +1027,12 @@
     syncPill.dataset.status = annotation.syncStatus || "synced";
     syncPill.textContent = syncStatusLabel(annotation.syncStatus);
     sync.append(syncPill);
-    if (annotation.syncStatus === "failed" && annotation.syncError) {
+    const duplicate = duplicateSyncedAnnotation(annotation);
+    const syncError = annotationSyncError(annotation, duplicate);
+    if (annotation.syncStatus === "failed" && syncError) {
       const error = document.createElement("span");
       error.className = "gh-annotator-panel__sync-error";
-      error.textContent = annotation.syncError;
+      error.textContent = syncError;
       sync.append(error);
     }
     item.append(sync);
@@ -1039,16 +1047,56 @@
 
     itemActions.append(focus, edit);
     if (annotation.syncStatus === "failed") {
-      const retry = panelButton("Retry");
-      retry.addEventListener("click", () => retryAnnotationSync(annotation));
-      itemActions.append(retry);
+      if (!duplicate) {
+        const retry = panelButton("Retry");
+        retry.addEventListener("click", () => retryAnnotationSync(annotation));
+        itemActions.append(retry);
+      }
+      const remove = panelButton("Delete");
+      remove.addEventListener("click", () => deleteFailedAnnotation(annotation));
+      itemActions.append(remove);
     }
     item.append(itemActions);
     return item;
   }
 
   function sortedAnnotations() {
-    return [...annotationsById.values()].sort((a, b) => (b.createdAt || "").localeCompare(a.createdAt || ""));
+    return [...annotationsById.values()].sort(compareAnnotationsByPagePosition);
+  }
+
+  function compareAnnotationsByPagePosition(left, right) {
+    const leftPosition = annotationPagePosition(left);
+    const rightPosition = annotationPagePosition(right);
+
+    if (leftPosition !== rightPosition) {
+      return leftPosition - rightPosition;
+    }
+
+    const statusDiff = annotationStatusRank(left) - annotationStatusRank(right);
+    if (statusDiff) {
+      return statusDiff;
+    }
+
+    return (left.createdAt || "").localeCompare(right.createdAt || "");
+  }
+
+  function annotationPagePosition(annotation) {
+    const start = annotation?.selector?.start;
+    return Number.isFinite(start) ? start : Number.POSITIVE_INFINITY;
+  }
+
+  function annotationStatusRank(annotation) {
+    const status = annotation?.syncStatus || "synced";
+    if (status === "synced") {
+      return 0;
+    }
+    if (status === "pending" || status === "syncing") {
+      return 1;
+    }
+    if (status === "failed") {
+      return 2;
+    }
+    return 3;
   }
 
   function removeLocalAnnotation(id) {
@@ -1098,6 +1146,99 @@
     } catch (error) {
       setPagePanelStatus(error?.message || String(error), "error");
     }
+  }
+
+  async function deleteFailedAnnotation(annotation) {
+    if (!annotation?.id) {
+      return;
+    }
+
+    setPagePanelStatus("Deleting local annotation...");
+    try {
+      const response = await sendRuntimeMessage({
+        type: "DELETE_LOCAL_ANNOTATION",
+        id: annotation.id,
+        url: annotation.url || location.href
+      });
+      if (!response?.ok) {
+        throw new Error(response?.error || "Could not delete annotation.");
+      }
+      removeLocalAnnotation(annotation.id);
+      setPagePanelStatus("Local failed annotation deleted.", "success");
+    } catch (error) {
+      setPagePanelStatus(error?.message || String(error), "error");
+    }
+  }
+
+  function annotationSyncError(annotation, duplicate = duplicateSyncedAnnotation(annotation)) {
+    if (annotation?.syncStatus !== "failed") {
+      return "";
+    }
+    if (duplicate) {
+      return "Duplicate of an existing synced annotation. Delete this local failed copy.";
+    }
+    return annotation.syncError || "";
+  }
+
+  function duplicateSyncedAnnotation(annotation) {
+    if (!annotation?.id) {
+      return null;
+    }
+
+    for (const candidate of annotationsById.values()) {
+      if (candidate?.id === annotation.id || (candidate?.syncStatus || "synced") !== "synced") {
+        continue;
+      }
+      if (equivalentAnnotation(annotation, candidate)) {
+        return candidate;
+      }
+    }
+    return null;
+  }
+
+  function findActiveEquivalentAnnotation(annotation) {
+    for (const candidate of annotationsById.values()) {
+      const status = candidate?.syncStatus || "synced";
+      if (candidate?.id === annotation?.id || status === "failed" || status === "canceled") {
+        continue;
+      }
+      if (equivalentAnnotation(annotation, candidate)) {
+        return candidate;
+      }
+    }
+    return null;
+  }
+
+  function equivalentAnnotation(left, right) {
+    if (!left || !right) {
+      return false;
+    }
+
+    const leftPosition = annotationPagePosition(left);
+    const rightPosition = annotationPagePosition(right);
+    if (
+      Number.isFinite(leftPosition)
+      && Number.isFinite(rightPosition)
+      && Math.abs(leftPosition - rightPosition) > 4
+    ) {
+      return false;
+    }
+
+    return compactMatchText(annotationQuote(left)) === compactMatchText(annotationQuote(right))
+      && normalizeMatchText(left.note || "") === normalizeMatchText(right.note || "")
+      && annotationTagsKey(left) === annotationTagsKey(right);
+  }
+
+  function annotationQuote(annotation) {
+    return annotation?.quote || annotation?.selector?.exact || "";
+  }
+
+  function annotationTagsKey(annotation) {
+    return (annotation?.tags || [])
+      .map((tag) => String(tag || "").trim().replace(/^#+/, "").toLowerCase())
+      .filter(Boolean)
+      .sort()
+      .join(",");
   }
 
   function syncStatusLabel(status) {
@@ -1338,6 +1479,15 @@
       syncStatus: userSettings.backgroundSync ? "pending" : "syncing",
       syncError: ""
     };
+
+    const duplicate = isNewAnnotation ? findActiveEquivalentAnnotation(annotation) : null;
+    if (duplicate) {
+      editor.save.disabled = false;
+      setEditorStatus("This annotation is already saved.", "success");
+      focusAnnotation(duplicate.id, false);
+      window.setTimeout(closeEditor, 700);
+      return;
+    }
 
     annotationsById.set(annotation.id, annotation);
     if (!promoteDraftHighlight(annotation)) {
@@ -1778,6 +1928,11 @@
       return;
     }
 
+    candidates.forEach((annotation) => {
+      annotationsById.set(annotation.id, annotation);
+    });
+    renderPagePanelAnnotations();
+
     debugLog("scheduleAnnotationApply:start", {
       count: candidates.length,
       observe: Boolean(options.observe)
@@ -1888,10 +2043,15 @@
     ends.push(start + exact.length);
 
     const normalizedExact = normalizeMatchText(exact);
+    const compactExact = compactMatchText(exact);
     for (const rawEnd of ends) {
       const end = Math.min(fullText.length, rawEnd);
       const candidate = fullText.slice(start, end);
-      if (candidate === exact || normalizeMatchText(candidate) === normalizedExact) {
+      if (
+        candidate === exact
+        || normalizeMatchText(candidate) === normalizedExact
+        || compactMatchText(candidate) === compactExact
+      ) {
         return { start, end };
       }
     }
@@ -1919,6 +2079,11 @@
     const normalizedMatch = findBestNormalizedTextMatch(fullText, selector);
     if (normalizedMatch) {
       candidates.push(normalizedMatch);
+    }
+
+    const compactMatch = findBestCompactTextMatch(fullText, selector);
+    if (compactMatch) {
+      candidates.push(compactMatch);
     }
 
     candidates.sort((a, b) => b.score - a.score);
@@ -1962,8 +2127,49 @@
     return candidates[0] || null;
   }
 
+  function findBestCompactTextMatch(fullText, selector) {
+    const exact = compactMatchText(selector.exact);
+    if (!exact) {
+      return null;
+    }
+
+    const compact = buildCompactTextMap(fullText);
+    const prefix = compactMatchText(selector.prefix || "");
+    const suffix = compactMatchText(selector.suffix || "");
+    const candidates = [];
+    let index = compact.text.indexOf(exact);
+
+    while (index >= 0 && candidates.length < 80) {
+      let score = 0;
+      if (prefix && compact.text.slice(Math.max(0, index - prefix.length), index) === prefix) {
+        score += prefix.length;
+      }
+      if (suffix && compact.text.slice(index + exact.length, index + exact.length + suffix.length) === suffix) {
+        score += suffix.length;
+      }
+
+      const start = compact.offsets[index];
+      const afterIndex = index + exact.length;
+      const end = afterIndex < compact.offsets.length
+        ? compact.offsets[afterIndex]
+        : fullText.length;
+      if (Number.isInteger(start) && end > start) {
+        candidates.push({ start, end, score });
+      }
+
+      index = compact.text.indexOf(exact, index + exact.length);
+    }
+
+    candidates.sort((a, b) => b.score - a.score);
+    return candidates[0] || null;
+  }
+
   function normalizeMatchText(value) {
     return String(value || "").replace(/\s+/g, " ").trim();
+  }
+
+  function compactMatchText(value) {
+    return String(value || "").replace(/\s+/g, "");
   }
 
   function buildNormalizedTextMap(fullText) {
@@ -1988,6 +2194,23 @@
     }
 
     return { text: text.trimStart(), offsets: offsets.slice(text.length - text.trimStart().length) };
+  }
+
+  function buildCompactTextMap(fullText) {
+    let text = "";
+    const offsets = [];
+
+    for (let index = 0; index < fullText.length; index += 1) {
+      const char = fullText[index];
+      if (/\s/.test(char)) {
+        continue;
+      }
+
+      text += char;
+      offsets.push(index);
+    }
+
+    return { text, offsets };
   }
 
   function rangeFromOffsets(nodes, start, end) {
@@ -2078,13 +2301,23 @@
     mark.appendChild(target);
   }
 
-  function focusAnnotation(id, scroll = true) {
+  function focusAnnotation(id, scroll = true, attempt = 0) {
     if (!id) {
-      return;
+      return false;
     }
     const marks = [...document.querySelectorAll(`[data-gh-annotation-id="${cssEscape(id)}"]`)];
     if (!marks.length) {
-      return;
+      const annotation = annotationsById.get(id);
+      if (!annotation || attempt > 5) {
+        return false;
+      }
+
+      applyAnnotations([annotation]);
+      const delays = [0, 80, 180, 360, 720, 1200];
+      window.setTimeout(() => {
+        focusAnnotation(id, scroll, attempt + 1);
+      }, delays[attempt] ?? 1200);
+      return false;
     }
 
     document.querySelectorAll(`.${HIGHLIGHT_CLASS}[data-active="true"]`).forEach((node) => {
@@ -2101,6 +2334,7 @@
         delete node.dataset.active;
       });
     }, 2200);
+    return true;
   }
 
   function buildTextIndex() {

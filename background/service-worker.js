@@ -14,6 +14,7 @@ const DEFAULT_SHOW_SELECTION_TOOLBAR = true;
 const DEFAULT_ACTIVATION_SHORTCUT = "Ctrl+E";
 const DEFAULT_CLIP_SHORTCUT = "Ctrl+O";
 const DEFAULT_BACKGROUND_SYNC = true;
+const RECENT_LOCAL_SYNC_RETENTION_MS = 10 * 60 * 1000;
 const GITHUB_API = "https://api.github.com";
 const GITHUB_API_VERSION = "2022-11-28";
 const DEBUG = true;
@@ -128,6 +129,10 @@ async function handleMessage(message, sender) {
 
     case "RETRY_ANNOTATION_SYNC":
       return { annotation: await retryAnnotationSync(message.id, message.url) };
+
+    case "DELETE_LOCAL_ANNOTATION":
+      await deleteLocalAnnotation(message.id, message.url);
+      return { annotations: await getCachedAnnotations(message.url), tasks: await listSyncTasks() };
 
     case "RETRY_CLIPPING_SYNC":
       return { clipping: await retryClippingSync(message.id) };
@@ -561,6 +566,49 @@ async function retryAnnotationSync(id, url) {
   return queued;
 }
 
+async function deleteLocalAnnotation(id, url) {
+  if (!id) {
+    throw new Error("Missing annotation id.");
+  }
+
+  const queue = await getSyncQueue();
+  const job = queue[id];
+  const targetUrl = url || job?.annotation?.url || "";
+  if (!targetUrl) {
+    throw new Error("Missing annotation URL.");
+  }
+
+  if (job) {
+    delete queue[id];
+    await saveSyncQueue(queue);
+  }
+
+  await removeCachedAnnotation(targetUrl, id);
+  await forgetSyncTask("annotation", id);
+  await notifyAnnotationDeleted(id, targetUrl);
+  debugLog("deleteLocalAnnotation", { id, url: targetUrl });
+}
+
+async function annotationFailureMessage(annotation, error) {
+  if (await hasEquivalentSyncedAnnotation(annotation)) {
+    return "Duplicate of an existing synced annotation.";
+  }
+  return formatError(error);
+}
+
+async function hasEquivalentSyncedAnnotation(annotation) {
+  if (!annotation?.url) {
+    return false;
+  }
+
+  const cached = await getCachedAnnotations(annotation.url);
+  return cached.some((candidate) => (
+    candidate?.id !== annotation.id
+    && (candidate?.syncStatus || "synced") === "synced"
+    && equivalentAnnotation(annotation, candidate)
+  ));
+}
+
 async function syncQueuedAnnotations() {
   if (syncQueueRunning) {
     debugLog("syncQueuedWork:alreadyRunning");
@@ -632,9 +680,10 @@ async function syncQueueJob(id) {
     await notifyAnnotationSyncUpdated(synced);
     debugLog("syncQueueJob:synced", { id, url: synced.url, attempts });
   } catch (error) {
+    const errorMessage = await annotationFailureMessage(syncing, error);
     const failed = markAnnotationSyncState(syncing, "failed", {
       attempts,
-      error: formatError(error)
+      error: errorMessage
     });
     const latestQueue = await getSyncQueue();
     latestQueue[id] = {
@@ -642,14 +691,14 @@ async function syncQueueJob(id) {
       annotation: failed,
       status: "failed",
       attempts,
-      error: formatError(error),
+      error: errorMessage,
       updatedAt: new Date().toISOString()
     };
     await saveSyncQueue(latestQueue);
     await cacheAnnotation(failed);
     await rememberSyncTask(syncTaskFromAnnotationJob(latestQueue[id]));
     await notifyAnnotationSyncUpdated(failed);
-    debugWarn("syncQueueJob:failed", { id, url: failed.url, attempts, error: formatError(error) });
+    debugWarn("syncQueueJob:failed", { id, url: failed.url, attempts, error: errorMessage });
   }
 }
 
@@ -805,6 +854,17 @@ async function rememberSyncTask(task) {
   ].slice(0, 5);
   await saveSyncTaskHistory(next);
   notifySyncTasksUpdated().catch((error) => debugWarn("rememberSyncTask:notifyFailed", { message: formatError(error) }));
+}
+
+async function forgetSyncTask(type, id) {
+  if (!type || !id) {
+    return;
+  }
+
+  const key = syncTaskKey({ type, id });
+  const history = await getSyncTaskHistory();
+  await saveSyncTaskHistory(history.filter((item) => syncTaskKey(item) !== key));
+  notifySyncTasksUpdated().catch((error) => debugWarn("forgetSyncTask:notifyFailed", { message: formatError(error) }));
 }
 
 async function listSyncTasks() {
@@ -1025,6 +1085,27 @@ async function notifyAnnotationSyncUpdated(annotation) {
     }));
   } catch {
     // Content scripts will pick the status up from cache on the next refresh.
+  }
+}
+
+async function notifyAnnotationDeleted(id, url) {
+  try {
+    await chrome.runtime.sendMessage({ type: "ANNOTATION_DELETED", id, url });
+  } catch {
+    // The native side panel may not be open.
+  }
+
+  try {
+    const tabs = await chrome.tabs.query({ url: ["http://*/*", "https://*/*"] });
+    await Promise.allSettled(tabs.map(async (tab) => {
+      if (tab.id == null || !urlMatches(tab.url, url)) {
+        return;
+      }
+      await updateBadgeForUrl(tab.id, url);
+      await chrome.tabs.sendMessage(tab.id, { type: "ANNOTATION_DELETED", id, url });
+    }));
+  } catch {
+    // Content scripts can refresh from cache if the live message is missed.
   }
 }
 
@@ -1458,14 +1539,36 @@ async function cacheAnnotation(annotation) {
   await chrome.storage.local.set({ [key]: sortAnnotations(next) });
 }
 
+async function removeCachedAnnotation(url, id) {
+  const key = await cacheKey(url);
+  const data = await chrome.storage.local.get(key);
+  const annotations = Array.isArray(data[key]) ? data[key] : [];
+  const next = annotations.filter((item) => item.id !== id);
+  await chrome.storage.local.set({ [key]: sortAnnotations(next) });
+  return sortAnnotations(next);
+}
+
 async function replaceCachedAnnotations(url, annotations) {
   const key = await cacheKey(url);
   const data = await chrome.storage.local.get(key);
   const existing = Array.isArray(data[key]) ? data[key] : [];
   const remote = annotations.map((annotation) => markAnnotationSyncState(annotation, "synced"));
   const remoteIds = new Set(remote.map((annotation) => annotation.id));
-  const localUnsynced = existing.filter((annotation) => annotation.id && !remoteIds.has(annotation.id) && isUnsyncedAnnotation(annotation));
-  const merged = sortAnnotations(remote.concat(localUnsynced));
+  const retainedLocal = existing.filter((annotation) => (
+    annotation.id
+    && !remoteIds.has(annotation.id)
+    && shouldKeepLocalAnnotationDuringRemoteRefresh(annotation)
+  ));
+  const merged = sortAnnotations(remote.concat(retainedLocal));
+  if (retainedLocal.length) {
+    debugLog("replaceCachedAnnotations:retainedLocal", {
+      url,
+      remoteCount: remote.length,
+      existingCount: existing.length,
+      retainedCount: retainedLocal.length,
+      retainedIds: retainedLocal.map((annotation) => annotation.id)
+    });
+  }
   await chrome.storage.local.set({ [key]: merged });
   return merged;
 }
@@ -1523,6 +1626,59 @@ function markAnnotationSyncState(annotation, status, details = {}) {
 
 function isUnsyncedAnnotation(annotation) {
   return annotation?.syncStatus === "pending" || annotation?.syncStatus === "syncing" || annotation?.syncStatus === "failed";
+}
+
+function shouldKeepLocalAnnotationDuringRemoteRefresh(annotation) {
+  if (isUnsyncedAnnotation(annotation)) {
+    return true;
+  }
+
+  if ((annotation?.syncStatus || "synced") !== "synced") {
+    return false;
+  }
+
+  const timestamp = Date.parse(annotation.syncSyncedAt || annotation.syncUpdatedAt || "");
+  return Number.isFinite(timestamp) && Date.now() - timestamp < RECENT_LOCAL_SYNC_RETENTION_MS;
+}
+
+function equivalentAnnotation(left, right) {
+  if (!left || !right) {
+    return false;
+  }
+
+  const leftPosition = left?.selector?.start;
+  const rightPosition = right?.selector?.start;
+  if (
+    Number.isFinite(leftPosition)
+    && Number.isFinite(rightPosition)
+    && Math.abs(leftPosition - rightPosition) > 4
+  ) {
+    return false;
+  }
+
+  return compactAnnotationText(annotationQuote(left)) === compactAnnotationText(annotationQuote(right))
+    && normalizeAnnotationText(left.note || "") === normalizeAnnotationText(right.note || "")
+    && annotationTagsKey(left) === annotationTagsKey(right);
+}
+
+function annotationQuote(annotation) {
+  return annotation?.quote || annotation?.selector?.exact || "";
+}
+
+function normalizeAnnotationText(value) {
+  return String(value || "").replace(/\s+/g, " ").trim();
+}
+
+function compactAnnotationText(value) {
+  return String(value || "").replace(/\s+/g, "");
+}
+
+function annotationTagsKey(annotation) {
+  return (annotation?.tags || [])
+    .map((tag) => String(tag || "").trim().replace(/^#+/, "").toLowerCase())
+    .filter(Boolean)
+    .sort()
+    .join(",");
 }
 
 function stripSyncMetadata(annotation) {
@@ -1689,9 +1845,11 @@ async function githubRequest(settings, path, options = {}) {
   debugLog("githubRequest:start", { method, path });
   const response = await fetch(`${GITHUB_API}${path}`, {
     method,
+    cache: "no-store",
     headers: {
       "Accept": "application/vnd.github+json",
       "Authorization": `Bearer ${settings.token}`,
+      "Cache-Control": "no-cache",
       "Content-Type": "application/json",
       "X-GitHub-Api-Version": GITHUB_API_VERSION
     },

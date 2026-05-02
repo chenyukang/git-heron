@@ -1,0 +1,9 @@
+{
+  "name": "git-heron",
+  "version": "0.1.0",
+  "private": true,
+  "scripts": {
+    "check": "node --check content/content-script.js && node --check background/service-worker.js",
+    "test": "node --test tests/*.test.mjs"
+  }
+}
