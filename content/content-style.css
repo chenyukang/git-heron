@@ -568,6 +568,10 @@
   box-shadow: 0 0 0 3px rgba(37, 99, 235, 0.12);
 }
 
+.gh-annotator-panel__input-password {
+  -webkit-text-security: disc;
+}
+
 .gh-annotator-panel__status {
   display: none;
   flex: 0 0 auto;
