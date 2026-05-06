@@ -573,7 +573,7 @@
     state.className = "gh-annotator-panel__pill";
     headingRow.append(heading, state);
 
-    const token = panelInput("Token", "password", "github_pat_...");
+    const token = panelInput("Token", "text", "github_pat_...");
     const repo = panelInput("Repository", "text", "owner/repo");
     const branch = panelInput("Branch", "text", "main");
     const basePath = panelInput("Path", "text", "annotations");
@@ -1296,12 +1296,9 @@
     label.className = "gh-annotator-panel__label";
     label.textContent = title;
     const input = document.createElement("input");
-    input.type = type;
     input.placeholder = placeholder;
-    input.autocomplete = type === "password" ? "new-password" : "off";
-    if (type === "password") {
-      input.setAttribute("data-1p-ignore", "true");
-      input.setAttribute("data-lpignore", "true");
+    if (title === "Token") {
+      input.classList.add("gh-annotator-panel__input-password");
     }
     input.spellcheck = false;
     label.append(input);
